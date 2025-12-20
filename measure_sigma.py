@@ -1,0 +1,603 @@
+"""
+Electrical Conductivity Measurement using Van der Pauw Method
+Converted from MATLAB to Python
+
+Instruments:
+- Keithley DAQ6510 Multimeter
+- Keithley 2230-30-1 Power Supply
+
+Author: Converted from MATLAB
+Date: 2025-11-01
+"""
+
+import pyvisa
+import numpy as np
+from scipy.optimize import brentq
+import time
+import traceback
+from constants import (
+    DAQ_RESOURCE,
+    PS_RESOURCE,
+    DEFAULT_SAMPLE_THICKNESS,
+    DEFAULT_SAMPLE_DIAMETER,
+    KNOWN_RESISTOR,
+    VDP_TOLERANCE
+)
+
+
+def measure_sigma(sample_t=None, sample_dia=None, verbose=True):
+    """
+    Measure electrical conductivity using Van der Pauw method.
+    
+    Parameters:
+    -----------
+    sample_t : float, optional
+        Sample thickness in mm (default from constants: 2.3 mm)
+    sample_dia : float, optional
+        Sample diameter in mm (default from constants: 12.65 mm)
+    verbose : bool, optional
+        Print detailed debug info (default: True)
+    
+    Returns:
+    --------
+    dict : Measurement results or None if failed
+    """
+    
+    sigma_raw = np.zeros(5)  # Store 5 measurements
+    
+    # Use defaults from constants if not provided
+    if sample_t is None:
+        sample_t = DEFAULT_SAMPLE_THICKNESS
+    if sample_dia is None:
+        sample_dia = DEFAULT_SAMPLE_DIAMETER
+    
+    # Init resource manager
+    try:
+        rm = pyvisa.ResourceManager()
+        if verbose:
+            print("✓ PyVISA ResourceManager initialized")
+            print(f"Available resources: {rm.list_resources()}")
+    except Exception as e:
+        print(f"✗ FATAL: Cannot initialize PyVISA ResourceManager")
+        print(f"  Error: {e}")
+        print(f"  Solution: Install NI-VISA or pyvisa-py backend")
+        return None
+    
+    if verbose:
+        print("="*60)
+        print("ELECTRICAL CONDUCTIVITY MEASUREMENT")
+        print("="*60)
+        print(f"Sample thickness: {sample_t} mm")
+        print(f"Sample diameter: {sample_dia} mm\n")
+    
+    # =========================================================================
+    # STEP 1: Measure current through known resistor (value from constants)
+    # =========================================================================
+    if verbose:
+        print("Step 1: Measuring current through known resistor...")
+    
+    daq = None
+    ps = None
+    current = None
+    
+    try:
+        # Connect to instruments
+        daq = rm.open_resource(DAQ_RESOURCE)
+        if verbose:
+            print(f"  ✓ Connected to DAQ: {DAQ_RESOURCE}")
+    except pyvisa.VisaIOError as e:
+        print(f"✗ ERROR: Cannot connect to DAQ6510 Multimeter")
+        print(f"  Resource: {DAQ_RESOURCE}")
+        print(f"  Error code: {e.error_code}")
+        print(f"  Error: {e}")
+        print(f"  Solution: Check USB connection, verify resource string")
+        return None
+    except Exception as e:
+        print(f"✗ ERROR: Unexpected error connecting to DAQ")
+        print(f"  {type(e).__name__}: {e}")
+        traceback.print_exc()
+        return None
+    
+    try:
+        ps = rm.open_resource(PS_RESOURCE)
+        if verbose:
+            print(f"  ✓ Connected to Power Supply: {PS_RESOURCE}")
+    except pyvisa.VisaIOError as e:
+        print(f"✗ ERROR: Cannot connect to Power Supply")
+        print(f"  Resource: {PS_RESOURCE}")
+        print(f"  Error code: {e.error_code}")
+        print(f"  Error: {e}")
+        print(f"  Solution: Check USB connection, verify resource string")
+        if daq:
+            daq.close()
+        return None
+    except Exception as e:
+        print(f"✗ ERROR: Unexpected error connecting to Power Supply")
+        print(f"  {type(e).__name__}: {e}")
+        traceback.print_exc()
+        if daq:
+            daq.close()
+        return None
+    
+    try:
+        # Configure DAQ for voltage on channel 103
+        daq.write('*RST')  # Reset
+        daq.write('ROUT:SCAN (@103)')  # Scan channel 103
+        daq.write('SENS:FUNC "VOLT:DC", (@103)')  # DC voltage mode
+        daq.write('VOLT:DC:RANG:AUTO ON,(@103)')  # Auto range
+        daq.write('VOLT:DC:NPLC 5,(@103)')  # 5 power line cycles
+        daq.write('ROUT:CLOS (@103)')  # Close channel 103
+        daq.write('ROUT:CLOS (@229)')  # Close routing 229
+        if verbose:
+            print("  ✓ DAQ configured for channel 103")
+        
+    except pyvisa.VisaIOError as e:
+        print(f"✗ ERROR: Failed to configure DAQ")
+        print(f"  Error: {e}")
+        print(f"  Solution: Check SCPI command syntax, verify channel numbers")
+        daq.close()
+        ps.close()
+        return None
+    except Exception as e:
+        print(f"✗ ERROR: Unexpected error configuring DAQ")
+        print(f"  {type(e).__name__}: {e}")
+        traceback.print_exc()
+        daq.close()
+        ps.close()
+        return None
+    
+    try:
+        # Configure Power Supply - All channels off first
+        ps.write('*RST')  # Reset
+        ps.write(':INST:SEL CH1')  # Select CH1
+        ps.write(':SOUR:FUNC:CURR')  # Current mode
+        ps.write(':SOUR:CURR 0.0')  # 0 A
+        ps.write(':SOUR:VOLT 0')  # 0 V
+        
+        ps.write(':INST:SEL CH2')  # Select CH2
+        ps.write(':SOUR:FUNC:CURR')
+        ps.write(':SOUR:CURR 0.0')
+        ps.write(':SOUR:VOLT 0')
+        
+        ps.write(':INST:SEL CH3')  # Select CH3
+        ps.write(':SOUR:FUNC:CURR')
+        ps.write(':SOUR:CURR 0.1')  # 100 mA
+        ps.write(':SOUR:VOLT 5')  # 5V limit
+        ps.write(':OUTP:STAT ON')  # Turn ON
+        if verbose:
+            print("  ✓ Power Supply configured, CH3 ON at 0.1A")
+        
+        time.sleep(2)  # Wait for stabilization
+        
+    except pyvisa.VisaIOError as e:
+        print(f"✗ ERROR: Failed to configure Power Supply")
+        print(f"  Error: {e}")
+        print(f"  Solution: Check if power supply supports these SCPI commands")
+        daq.close()
+        ps.close()
+        return None
+    except Exception as e:
+        print(f"✗ ERROR: Unexpected error configuring Power Supply")
+        print(f"  {type(e).__name__}: {e}")
+        traceback.print_exc()
+        daq.close()
+        ps.close()
+        return None
+    
+    try:
+        # Read voltage from DAQ
+        result_str = daq.query('READ?')
+        ps.write(':OUTP:STAT OFF')  # Turn off immediately
+        
+        voltage = float(result_str.strip())
+        current = voltage / KNOWN_RESISTOR  # Known resistance from constants
+        
+        if verbose:
+            print(f"  ✓ Voltage measured: {voltage:.6f} V")
+            print(f"  ✓ Current calculated: {current:.6f} A\n")
+        
+    except ValueError as e:
+        print(f"✗ ERROR: Cannot parse voltage reading")
+        print(f"  Received: '{result_str}'")
+        print(f"  Error: {e}")
+        print(f"  Solution: Check DAQ output format")
+        ps.write(':OUTP:STAT OFF')
+        daq.close()
+        ps.close()
+        return None
+    except Exception as e:
+        print(f"✗ ERROR: Failed to read voltage")
+        print(f"  {type(e).__name__}: {e}")
+        traceback.print_exc()
+        ps.write(':OUTP:STAT OFF')
+        daq.close()
+        ps.close()
+        return None
+    
+    # Close after Step 1
+    daq.close()
+    ps.close()
+    if verbose:
+        print("  ✓ Instruments closed after current measurement\n")
+    
+    if current is None or current <= 0:
+        print(f"✗ ERROR: Invalid current measured: {current}")
+        return None
+    
+    # =========================================================================
+    # STEP 2: Van der Pauw measurements (5 iterations)
+    # =========================================================================
+    if verbose:
+        print("Step 2: Van der Pauw measurements (4 voltages × 5 iterations)")
+        print("-" * 60)
+    
+    for j in range(5):
+        if verbose:
+            print(f"\nIteration {j+1}/5:")
+        
+        volt1, volt2, volt3, volt4 = None, None, None, None
+        
+        # --- Measurement 1: Ch204, Route227 ---
+        try:
+            daq = rm.open_resource(DAQ_RESOURCE)
+            ps = rm.open_resource(PS_RESOURCE)
+            
+            # Configure DAQ
+            daq.write('*RST')
+            daq.write('ROUT:OPEN:ALL')  # Open all first
+            daq.write('ROUT:SCAN (@204)')
+            daq.write('SENS:FUNC "VOLT:DC", (@204)')
+            daq.write('VOLT:DC:RANG:AUTO ON,(@204)')
+            daq.write('VOLT:DC:NPLC 5,(@204)')
+            daq.write('ROUT:CLOS (@204)')
+            daq.write('ROUT:CLOS (@227)')
+            
+            # Configure PS (same as before)
+            ps.write('*RST')
+            ps.write(':INST:SEL CH1')
+            ps.write(':SOUR:FUNC:CURR')
+            ps.write(':SOUR:CURR 0.0')
+            ps.write(':SOUR:VOLT 0')
+            ps.write(':INST:SEL CH2')
+            ps.write(':SOUR:FUNC:CURR')
+            ps.write(':SOUR:CURR 0.0')
+            ps.write(':SOUR:VOLT 0')
+            ps.write(':INST:SEL CH3')
+            ps.write(':SOUR:FUNC:CURR')
+            ps.write(':SOUR:CURR 0.1')
+            ps.write(':SOUR:VOLT 5')
+            ps.write(':OUTP:STAT ON')
+            
+            time.sleep(2)
+            
+            result_str = daq.query('READ?')
+            ps.write(':OUTP:STAT OFF')
+            volt1 = float(result_str.strip())
+            
+            if verbose:
+                print(f"  V1 (204-227): {volt1:.6f} V")
+            
+            daq.close()
+            ps.close()
+            
+        except Exception as e:
+            print(f"✗ ERROR in measurement 1 (iteration {j+1})")
+            print(f"  {type(e).__name__}: {e}")
+            if daq:
+                daq.close()
+            if ps:
+                ps.close()
+            continue
+        
+        # --- Measurement 2: Ch204, Route235 ---
+        try:
+            daq = rm.open_resource(DAQ_RESOURCE)
+            ps = rm.open_resource(PS_RESOURCE)
+            
+            daq.write('ROUT:OPEN:ALL')
+            daq.write('ROUT:SCAN (@204)')
+            daq.write('SENS:FUNC "VOLT:DC", (@204)')
+            daq.write('VOLT:DC:RANG:AUTO ON,(@204)')
+            daq.write('VOLT:DC:NPLC 5,(@204)')
+            daq.write('ROUT:CLOS (@204)')
+            daq.write('ROUT:CLOS (@235)')  # Different route
+            
+            ps.write('*RST')
+            ps.write(':INST:SEL CH1')
+            ps.write(':SOUR:FUNC:CURR')
+            ps.write(':SOUR:CURR 0.0')
+            ps.write(':SOUR:VOLT 0')
+            ps.write(':INST:SEL CH2')
+            ps.write(':SOUR:FUNC:CURR')
+            ps.write(':SOUR:CURR 0.0')
+            ps.write(':SOUR:VOLT 0')
+            ps.write(':INST:SEL CH3')
+            ps.write(':SOUR:FUNC:CURR')
+            ps.write(':SOUR:CURR 0.1')
+            ps.write(':SOUR:VOLT 5')
+            ps.write(':OUTP:STAT ON')
+            
+            time.sleep(2)
+            
+            result_str = daq.query('READ?')
+            ps.write(':OUTP:STAT OFF')
+            volt2 = float(result_str.strip())
+            
+            if verbose:
+                print(f"  V2 (204-235): {volt2:.6f} V")
+            
+            daq.close()
+            ps.close()
+            
+        except Exception as e:
+            print(f"✗ ERROR in measurement 2 (iteration {j+1})")
+            print(f"  {type(e).__name__}: {e}")
+            if daq:
+                daq.close()
+            if ps:
+                ps.close()
+            continue
+        
+        # --- Measurement 3: Ch206, Route229 ---
+        try:
+            daq = rm.open_resource(DAQ_RESOURCE)
+            ps = rm.open_resource(PS_RESOURCE)
+            
+            daq.write('ROUT:OPEN:ALL')
+            daq.write('ROUT:SCAN (@206)')  # Different channel
+            daq.write('SENS:FUNC "VOLT:DC", (@206)')
+            daq.write('VOLT:DC:RANG:AUTO ON,(@206)')
+            daq.write('VOLT:DC:NPLC 5,(@206)')
+            daq.write('ROUT:CLOS (@206)')
+            daq.write('ROUT:CLOS (@229)')
+            
+            ps.write('*RST')
+            ps.write(':INST:SEL CH1')
+            ps.write(':SOUR:FUNC:CURR')
+            ps.write(':SOUR:CURR 0.0')
+            ps.write(':SOUR:VOLT 0')
+            ps.write(':INST:SEL CH2')
+            ps.write(':SOUR:FUNC:CURR')
+            ps.write(':SOUR:CURR 0.0')
+            ps.write(':SOUR:VOLT 0')
+            ps.write(':INST:SEL CH3')
+            ps.write(':SOUR:FUNC:CURR')
+            ps.write(':SOUR:CURR 0.1')
+            ps.write(':SOUR:VOLT 5')
+            ps.write(':OUTP:STAT ON')
+            
+            time.sleep(2)
+            
+            result_str = daq.query('READ?')
+            ps.write(':OUTP:STAT OFF')
+            volt3 = float(result_str.strip())
+            
+            if verbose:
+                print(f"  V3 (206-229): {volt3:.6f} V")
+            
+            daq.close()
+            ps.close()
+            
+        except Exception as e:
+            print(f"✗ ERROR in measurement 3 (iteration {j+1})")
+            print(f"  {type(e).__name__}: {e}")
+            if daq:
+                daq.close()
+            if ps:
+                ps.close()
+            continue
+        
+        # --- Measurement 4: Ch206, Route237 ---
+        try:
+            daq = rm.open_resource(DAQ_RESOURCE)
+            ps = rm.open_resource(PS_RESOURCE)
+            
+            daq.write('ROUT:OPEN:ALL')
+            daq.write('ROUT:SCAN (@206)')
+            daq.write('SENS:FUNC "VOLT:DC", (@206)')
+            daq.write('VOLT:DC:RANG:AUTO ON,(@206)')
+            daq.write('VOLT:DC:NPLC 5,(@206)')
+            daq.write('ROUT:CLOS (@206)')
+            daq.write('ROUT:CLOS (@237)')  # Different route
+            
+            ps.write('*RST')
+            ps.write(':INST:SEL CH1')
+            ps.write(':SOUR:FUNC:CURR')
+            ps.write(':SOUR:CURR 0.0')
+            ps.write(':SOUR:VOLT 0')
+            ps.write(':INST:SEL CH2')
+            ps.write(':SOUR:FUNC:CURR')
+            ps.write(':SOUR:CURR 0.0')
+            ps.write(':SOUR:VOLT 0')
+            ps.write(':INST:SEL CH3')
+            ps.write(':SOUR:FUNC:CURR')
+            ps.write(':SOUR:CURR 0.1')
+            ps.write(':SOUR:VOLT 5')
+            ps.write(':OUTP:STAT ON')
+            
+            time.sleep(2)
+            
+            result_str = daq.query('READ?')
+            ps.write(':OUTP:STAT OFF')
+            volt4 = float(result_str.strip())
+            
+            if verbose:
+                print(f"  V4 (206-237): {volt4:.6f} V")
+            
+            daq.close()
+            ps.close()
+            
+        except Exception as e:
+            print(f"✗ ERROR in measurement 4 (iteration {j+1})")
+            print(f"  {type(e).__name__}: {e}")
+            if daq:
+                daq.close()
+            if ps:
+                ps.close()
+            continue
+        
+        # Check if all 4 voltages were measured
+        if None in [volt1, volt2, volt3, volt4]:
+            print(f"✗ Iteration {j+1} incomplete, skipping resistivity calculation")
+            sigma_raw[j] = 0
+            continue
+        
+        # --- Calculate resistivity using Van der Pauw ---
+        try:
+            V1 = abs(volt1 - volt2) / 2.0  # Average voltage 1
+            V2 = abs(volt3 - volt4) / 2.0  # Average voltage 2
+            
+            R1 = V1 / current  # Resistance 1
+            R2 = V2 / current  # Resistance 2
+            
+            if verbose:
+                print(f"  R1 = {R1:.6f} Ω, R2 = {R2:.6f} Ω")
+            
+            d = sample_t / 10.0  # Thickness in cm
+            
+            # Van der Pauw equation
+            def vdp_equation(rho):
+                return (np.exp(-np.pi * R1 * d / rho) + 
+                        np.exp(-np.pi * R2 * d / rho)) - 1
+            
+            # Find initial guess for bracketing
+            Rho1 = np.arange(5e-5, 100, 10e-5)
+            F = np.array([abs(vdp_equation(r)) for r in Rho1])
+            id_min = np.nanargmin(F)
+            Rho_min = Rho1[id_min]
+            
+            # Solve for resistivity using Brent's method (robust bracketed root finding)
+            try:
+                # Find a bracket around Rho_min where function changes sign
+                bracket_found = False
+                for scale in [10, 100, 1000, 10000]:
+                    a, b = Rho_min / scale, Rho_min * scale
+                    fa, fb = vdp_equation(a), vdp_equation(b)
+                    if fa * fb < 0:  # Opposite signs, valid bracket
+                        bracket_found = True
+                        if verbose:
+                            print(f"    Bracket found: [{a:.6e}, {b:.6e}]")
+                        break
+                
+                if bracket_found:
+                    Rho = brentq(vdp_equation, a, b, xtol=1e-12, rtol=1e-10)
+                else:
+                    # Fallback: try wide bracket, but check sign change first
+                    fa_wide, fb_wide = vdp_equation(1e-8), vdp_equation(1e3)
+                    if fa_wide * fb_wide < 0:
+                        if verbose:
+                            print(f"    Using wide bracket [1e-8, 1e3]")
+                        Rho = brentq(vdp_equation, 1e-8, 1e3, xtol=1e-12, rtol=1e-10)
+                    else:
+                        # No valid bracket found, use initial guess
+                        if verbose:
+                            print(f"    No valid bracket found, failed to find resistivity")
+                        Rho = 0
+
+                
+                if Rho <= 0:
+                    raise ValueError(f"Non-physical resistivity: {Rho}")
+                
+                sigma_raw[j] = 1.0 / Rho  # Conductivity
+
+                
+            except (ValueError, RuntimeError) as solve_error:
+                print(f"    ⚠ brentq failed: {solve_error}, using initial guess")
+                sigma_raw[j] = 0  # failed to find valid sigma
+            
+            if verbose:
+                print(f"  ✓ σ = {sigma_raw[j]:.2f} S/cm")
+                
+        except Exception as e:
+            print(f"✗ ERROR calculating resistivity (iteration {j+1})")
+            print(f"  {type(e).__name__}: {e}")
+            traceback.print_exc()
+            sigma_raw[j] = 0
+            continue
+    
+    # =========================================================================
+    # STEP 3: Statistical analysis and correction
+    # =========================================================================
+    if verbose:
+        print("\n" + "="*60)
+        print("RESULTS")
+        print("="*60)
+        print(f"Raw sigma values: {sigma_raw}")
+    
+    valid_sigma = sigma_raw[sigma_raw > 0]  # Filter valid measurements
+    
+    if len(valid_sigma) == 0:
+        print("✗ FATAL: No valid measurements obtained")
+        print("  Check instrument connections and channel configurations")
+        return None
+    
+    sigma_avg = np.median(valid_sigma)  # Median (robust to outliers)
+    std_dev = np.std(sigma_raw)
+    uncorr_sigma = sigma_avg
+    
+    # Geometry correction
+    D1 = sample_dia
+    d1 = (D1 - 9.0) / 2.0
+    error = 4 * ((d1**2) / (2 * D1**2 * np.log(2)))
+    corr_sigma = sigma_avg * (1 - error)
+    
+    if verbose:
+        print(f"Valid measurements: {len(valid_sigma)}/5")
+        print(f"Median sigma: {sigma_avg:.2f} S/cm")
+        print(f"Standard deviation: {std_dev:.4f}")
+        print(f"Geometry correction: {error:.6f}")
+        print(f"✓ CORRECTED SIGMA: {corr_sigma:.2f} S/cm")
+        print("="*60)
+    
+    results = {
+        'corr_sigma': corr_sigma,
+        'uncorr_sigma': uncorr_sigma,
+        'sigma_raw': sigma_raw,
+        'std_dev': std_dev,
+        'current': current,
+        'sample_thickness': sample_t,
+        'sample_diameter': sample_dia,
+        'valid_count': len(valid_sigma)
+    }
+    
+    return results  
+           
+
+
+def save_to_excel(results, temperature, filename='conductivity_results.xlsx'):
+    """
+    Save measurement results to Excel.
+    
+    Parameters:
+    -----------
+    results : dict
+        Results from measure_sigma()
+    temperature : float
+        Temperature in Kelvin
+    filename : str
+        Output filename
+    """
+    try:
+        import pandas as pd
+        
+        data = {
+            'Temperature (K)': [temperature],
+            'Uncorrected Sigma (S/cm)': [results['uncorr_sigma']],
+            'Corrected Sigma (S/cm)': [results['corr_sigma']],
+            'Standard Deviation': [results['std_dev']],
+            'Current (A)': [results['current']],
+            'Sample Thickness (mm)': [results['sample_thickness']],
+            'Sample Diameter (mm)': [results['sample_diameter']],
+            'Valid Measurements': [results['valid_count']]
+        }
+        
+        df = pd.DataFrame(data)
+        df.to_excel(filename, index=False)
+        print(f"\n✓ Results saved to {filename}")
+        
+    except ImportError:
+        print("✗ ERROR: pandas or openpyxl not installed")
+        print("  Install: pip install pandas openpyxl")
+    except Exception as e:
+        print(f"✗ ERROR saving to Excel: {type(e).__name__}: {e}")
+        traceback.print_exc()
