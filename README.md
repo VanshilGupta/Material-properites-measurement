@@ -1,24 +1,26 @@
-# Thermoelectric Measurement System
+# Thermoelectric Material Properties Measurement System
 
-Complete Python system for measuring **Seebeck coefficient** and **electrical conductivity (σ)** of thermoelectric materials.
+Complete Python system for measuring **Seebeck coefficient** and **electrical conductivity (σ)** of thermoelectric materials using Van der Pauw method.
 
 ## 📁 Project Structure
 
 ```
-Seeback-sigma-measurement-app/
-├── seebeck_measurement/          # Seebeck measurement package
-│   ├── measurement.py            # Main orchestration
-│   ├── instruments.py            # Hardware control
-│   ├── temperature_conversion.py # Thermocouple conversions
-│   ├── data_processing.py        # Data averaging & export
-│   ├── curve_fitting.py          # Seebeck calculation
-│   ├── plotting.py               # Real-time visualization
-│   └── config.py                 # Configuration
-│
-├── measure_sigma.py              # Conductivity measurement
+Material-properties-measurement/
+├── constants.py                  # Shared instrument IDs & sigma constants
+├── measure_sigma.py              # Electrical conductivity measurement
 ├── run_seebeck.py                # Run Seebeck measurement
 ├── run_sigma.py                  # Run conductivity measurement
-└── requirements.txt              # Dependencies
+├── requirements.txt              # Dependencies
+│
+└── seebeck_measurement/          # Seebeck measurement package
+    ├── __init__.py               # Package exports
+    ├── config.py                 # Seebeck-specific configuration
+    ├── measurement.py            # Main orchestration
+    ├── instruments.py            # Hardware control (DAQ, PS)
+    ├── temperature_conversion.py # Thermocouple conversions (ITS-90)
+    ├── data_processing.py        # Data averaging & CSV export
+    ├── curve_fitting.py          # Seebeck coefficient calculation
+    └── plotting.py               # Real-time visualization
 ```
 
 ---
@@ -39,11 +41,21 @@ python --version
 ### 2. Install Dependencies
 
 ```bash
-cd Seeback-sigma-measurement-app
+cd Material-properties-measurement
 pip install -r requirements.txt
 ```
 
-### 3. Run Measurements
+### 3. Install VISA Backend
+
+Install ONE of the following for instrument communication:
+
+**Option A: NI-VISA (Recommended)**
+- Download from: https://www.ni.com/en/support/downloads/drivers/download.ni-visa.html
+
+**Option B: Keysight IO Libraries**
+- Download from: https://www.keysight.com/find/iolib
+
+### 4. Run Measurements
 
 **Seebeck Coefficient:**
 ```bash
@@ -57,6 +69,61 @@ python run_sigma.py
 
 ---
 
+## ⚙️ Configuration
+
+### Constants File (Shared)
+
+All instrument IDs and shared constants are in **[constants.py](constants.py)**:
+
+```python
+# Instrument Resource Strings (VISA Addresses)
+DAQ_RESOURCE = 'USB0::0x05E6::0x6510::04619482::0::INSTR'
+PS_RESOURCE = 'USB0::0x05E6::0x2230::805224014787570003::0::INSTR'
+
+# Instrument IDs
+DAQ_VENDOR_ID = 0x05E6
+DAQ_PRODUCT_ID = 0x6510
+DAQ_SERIAL = '04619482'
+
+PS_VENDOR_ID = 0x05E6
+PS_PRODUCT_ID = 0x2230
+PS_SERIAL = '805224014787570003'
+
+# Sigma Measurement Constants
+DEFAULT_SAMPLE_THICKNESS = 2.3   # mm
+DEFAULT_SAMPLE_DIAMETER = 12.65  # mm
+KNOWN_RESISTOR = 0.1029          # Ohms
+DAQ_TIMEOUT = 20000              # ms
+```
+
+### Seebeck-Specific Config
+
+Additional Seebeck parameters in **[seebeck_measurement/config.py](seebeck_measurement/config.py)**:
+
+```python
+# Imports shared constants from root constants.py
+from constants import DAQ_RESOURCE, PS_RESOURCE, DAQ_TIMEOUT, ...
+
+# Seebeck-specific settings
+DEFAULT_MEASUREMENT_TIME = 480   # seconds (8 minutes)
+MAX_TEMP_DIFFERENCE = 8.0        # °C
+HEATER_CURRENT = 0.3             # Amps
+HEATER_VOLTAGE = 10.0            # Volts
+DAQ_CHANNELS = [101, 106, 111, 116, 111, 106, 101]
+```
+
+### Find Your Instruments
+
+```python
+import pyvisa
+rm = pyvisa.ResourceManager()
+print(rm.list_resources())
+```
+
+Update `constants.py` with your instrument addresses.
+
+---
+
 ## 📊 Measurements
 
 ### Seebeck Coefficient Measurement
@@ -64,8 +131,8 @@ python run_sigma.py
 Measures thermoelectric voltage response to temperature gradient.
 
 **Instruments:**
-- Keysight DAQ6510 Data Acquisition System
-- Keysight 2230-30-1 Triple Output Power Supply
+- Keithley DAQ6510 Data Acquisition System
+- Keithley 2230-30-1 Triple Output Power Supply
 - Type K thermocouples
 
 **Method:**
@@ -88,56 +155,25 @@ Measures thermoelectric voltage response to temperature gradient.
 Measures electrical conductivity using Van der Pauw method.
 
 **Instruments:**
-- Keysight DAQ6510 Data Acquisition System
-- Keysight 2230-30-1 Triple Output Power Supply
+- Keithley DAQ6510 Data Acquisition System
+- Keithley 2230-30-1 Triple Output Power Supply
 
 **Method:**
-1. Measures current through known resistor
-2. Applies current to sample corners
-3. Measures voltages in perpendicular directions
-4. Calculates resistivity using Van der Pauw equations
-5. Computes conductivity (σ = 1/ρ)
+1. Measures current through known resistor (0.1029 Ω)
+2. Performs 5 iterations of 4-point measurements
+3. Applies current to sample corners via matrix switching
+4. Measures voltages in perpendicular directions
+5. Solves Van der Pauw equation using Brent's method
+6. Computes conductivity with geometry correction
 
-**Duration:** ~1-2 minutes
+**Duration:** ~80-90 seconds
 
 **Output:**
-- Electrical conductivity (S/m)
-- Resistivity (Ω·m)
+- Electrical conductivity (S/cm)
+- Resistivity (Ω·cm)
+- Excel file with results
 
----
-
-## ⚙️ Configuration
-
-### Update Instrument Addresses
-
-Edit [seebeck_measurement/config.py](seebeck_measurement/config.py) for Seebeck:
-```python
-DAQ_RESOURCE = 'USB0::0x05E6::0x6510::04619482::0::INSTR'
-PS_RESOURCE = 'USB0::0x05E6::0x2230::805224014787570003::0::INSTR'
-```
-
-Edit [measure_sigma.py](measure_sigma.py) for Conductivity (lines 36-37):
-```python
-DAQ_RESOURCE = 'USB0::0x05E6::0x6510::04619482::0::INSTR'
-PS_RESOURCE = 'USB0::0x05E6::0x2230::805224014787570003::0::INSTR'
-```
-
-**Find your instruments:**
-```python
-import pyvisa
-rm = pyvisa.ResourceManager()
-print(rm.list_resources())
-```
-
-### Measurement Parameters
-
-**Seebeck:** Edit [seebeck_measurement/config.py](seebeck_measurement/config.py)
-- Measurement time
-- Temperature thresholds
-- Heater parameters
-- DAQ channels
-
-**Conductivity:** Edit sample dimensions when prompted or in code
+**Safety:** Matrix relays are never switched while current is flowing.
 
 ---
 
@@ -167,17 +203,17 @@ print(f"Temperature: {results['T_avg']:.2f} °C")
 ```python
 from measure_sigma import measure_sigma
 
-# Run measurement
+# Run measurement (uses defaults from constants.py)
 results = measure_sigma(
-    sample_t=2.3,      # thickness in mm
-    sample_dia=12.65,  # diameter in mm
+    sample_t=2.3,      # thickness in mm (optional)
+    sample_dia=12.65,  # diameter in mm (optional)
     verbose=True
 )
 
 # Get results
 if results:
-    print(f"Conductivity: {results['sigma']:.2e} S/m")
-    print(f"Resistivity: {results['rho']:.2e} Ω·m")
+    print(f"Conductivity: {results['corr_sigma']:.2f} S/cm")
+    print(f"Current: {results['current']:.6f} A")
 ```
 
 ---
@@ -192,7 +228,8 @@ Files saved to `~/seebeck_data/`:
 Columns: `DT, T1, T2, V1, V2, time`
 
 ### Conductivity Measurement
-Results printed to console (can be logged to file)
+- Console output with detailed measurement progress
+- Optional Excel export: `sigma_measurement.xlsx`
 
 ---
 
@@ -205,7 +242,7 @@ Results printed to console (can be logged to file)
 **Solution:**
 1. Install NI-VISA or Keysight IO Libraries
 2. Verify USB connections
-3. Check resource strings match your instruments
+3. Check resource strings in `constants.py`
 4. List available resources:
    ```python
    import pyvisa
@@ -221,19 +258,23 @@ Results printed to console (can be logged to file)
 pip install -r requirements.txt
 ```
 
+### Van der Pauw Solver Fails
+
+**Problem:** `brentq failed` warning
+
+**Solution:** The code automatically falls back to initial guess. If results seem wrong:
+- Check sample dimensions
+- Verify current is flowing (check voltage readings)
+- Ensure good electrical contact
+
 ### Plot Not Showing
 
 **Problem:** Seebeck plot doesn't appear
 
 **Solution:**
 - Install matplotlib: `pip install matplotlib`
-- Use `enable_plotting=True` when creating SeebeckMeasurement
+- Use `enable_plotting=True`
 - Check if running in headless environment
-
-### Permission Errors
-
-**Windows:** Run as Administrator
-**Linux:** Check USB device permissions
 
 ---
 
@@ -259,134 +300,62 @@ Type K thermocouple conversions use ITS-90 polynomials.
 Four-point probe measurement eliminating contact resistance:
 
 ```
-ρ = (π × t / ln(2)) × f × (R_A + R_B) / 2
-σ = 1 / ρ
+exp(-π·R₁·d/ρ) + exp(-π·R₂·d/ρ) = 1
 ```
 
-Where:
-- `t` = sample thickness
-- `f` = geometric factor (solved numerically)
-- `R_A`, `R_B` = resistances in perpendicular directions
+Solved using `scipy.optimize.brentq` (Brent's bracketed root-finding method) for robust convergence.
 
----
-
-## 🎯 Best Practices
-
-1. **Calibrate instruments** before measurements
-2. **Stabilize temperature** before Seebeck measurement
-3. **Check connections** to avoid contact resistance
-4. **Use consistent sample dimensions** for comparisons
-5. **Run multiple measurements** for statistical accuracy
-6. **Save data immediately** after each measurement
+Geometry correction applied for finite sample size:
+```
+σ_corrected = σ × (1 - error)
+error = 4 × (d₁² / (2 × D₁² × ln(2)))
+```
 
 ---
 
 ## 📦 Dependencies
 
-- `numpy` - Numerical computations
-- `scipy` - Curve fitting and optimization
-- `matplotlib` - Plotting
-- `pyvisa` - Instrument communication
-- `pyvisa-py` - Pure Python VISA backend
+```
+pyvisa>=1.14.0
+pyvisa-py>=0.7.1
+numpy>=1.24.0
+scipy>=1.11.0
+matplotlib>=3.7.0
+pandas>=2.0.0
+openpyxl>=3.1.0
+```
 
 Install all:
 ```bash
 pip install -r requirements.txt
 ```
 
+---
 
-## 🙋 Support
+## 🎯 Best Practices
 
-For issues or questions:
-1. Check the troubleshooting section
-2. Verify instrument connections
-3. Review configuration files
-4. Check Python version compatibility (3.8+)
+1. **Update constants.py** with your instrument addresses before first use
+2. **Calibrate instruments** before measurements
+3. **Stabilize temperature** before Seebeck measurement
+4. **Check connections** to avoid contact resistance
+5. **Use consistent sample dimensions** for comparisons
+6. **Run multiple measurements** for statistical accuracy
 
 ---
 
+## 📋 Changelog
+
+### v1.0.0 (December 2025)
+- Initial release
+- Seebeck coefficient measurement with real-time plotting
+- Van der Pauw electrical conductivity measurement
+- Centralized constants file for easy configuration
+- Robust root-finding using Brent's method
+- Matrix switching safety (no hot-switching)
+
+---
+
+**Author:** VanshilGupta  
+**Repository:** [Material-properites-measurement](https://github.com/VanshilGupta/Material-properites-measurement)  
 **Version:** 1.0.0  
 **Last Updated:** December 2025
-
-Save this as `requirements.txt` in your project folder:
-```
-pyvisa>=1.14.0
-pyvisa-py>=0.7.1
-numpy>=1.24.0
-scipy>=1.11.0
-pandas>=2.0.0
-openpyxl>=3.1.0
-```
-
-Install all libraries:
-```
-pip install -r requirements.txt
-```
-
----
-
-## Step 4: Install VISA Backend
-
-You need to install ONE of the following (this allows Python to communicate with instruments):
-
-**Option A: NI-VISA (Recommended)**
-- Download from: https://www.ni.com/en/support/downloads/drivers/download.ni-visa.html
-- Install the software
-- Restart your computer
-
-**Option B: Keysight IO Libraries**
-- Download from: https://www.keysight.com/find/iolib
-- Install the software
-- Restart your computer
-
----
-
-## Step 5: Connect Instruments
-
-1. Connect Keithley DAQ6510 to computer via USB cable
-2. Connect Keithley 2230-30-1 Power Supply to computer via USB cable
-3. Turn ON both instruments
-4. Wait 10-20 seconds for Windows to install drivers
-
----
-
-## Step 6: Verify Connected Devices
-
-Make sure your virtual environment is activated.
-
-Run this command:
-```
-python -c "import pyvisa; rm = pyvisa.ResourceManager(); print(rm.list_resources())"
-```
-
-**Expected Output:**
-You should see something like:
-```
-('USB0::0x05E6::0x6510::04619482::0::INSTR',
- 'USB0::0x05E6::0x2230::805224014787570003::0::INSTR')
-```
-
-The first line is your DAQ6510 Multimeter.
-The second line is your Power Supply.
-
-**If you see your instruments listed, setup is complete!**
-
-**If you don't see any instruments:**
-- Check USB connections
-- Make sure instruments are turned ON
-- Verify VISA backend (NI-VISA or Keysight IO) is installed
-- Try unplugging and replugging USB cables
-- Restart your computer
-
-**If your instrument addresses are different from the ones above:**
-You will need to update the addresses in `measure_sigma.py`:
-```python
-DAQ_RESOURCE = 'YOUR_DAQ_ADDRESS_HERE'
-PS_RESOURCE = 'YOUR_POWER_SUPPLY_ADDRESS_HERE'
-```
-
----
-
-## Setup Complete
-
-Your system is now ready to run measurements.
