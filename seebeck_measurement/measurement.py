@@ -2,6 +2,8 @@
 
 import numpy as np
 import time
+
+from seebeck_measurement.config import DAQ_CHANNELS
 from .instruments import DAQController, PowerSupplyController
 from .temperature_conversion import temp_to_voltage, voltage_to_temp
 from .data_processing import average_data, save_to_csv
@@ -82,7 +84,7 @@ class SeebeckMeasurement:
         V_ref2 = temp_to_voltage(T_ref2)  # mV
         
         # Read voltages from DAQ
-        voltages = self.daq.read_voltages()
+        voltages = self.daq.read_voltages(DAQ_CHANNELS)
         
         # Process readings
         # voltages order: [101, 106, 111, 116, 111, 106, 101]
@@ -106,7 +108,7 @@ class SeebeckMeasurement:
             'T1': [T1_1, T1_2],
             'T2': [T2_1, T2_2],
             'V1': [V1_1, V1_2],
-            'V2': [V2_1, V2_1]
+            'V2': [V2_1, V2_1],
         }
     
     def control_heaters(self, elapsed_time: float, seebeck_meas_time: float):
@@ -227,6 +229,10 @@ class SeebeckMeasurement:
             # Ensure heaters are off
             self.ps.turn_off_all_channels()
             self.disconnect_instruments()
+            
+            # Save real-time plot before closing
+            if self.plotter:
+                self.plotter.save_plot(filename, output_folder)
         
         # Process and save data
         results = self.process_and_save_data(filename, output_folder)
@@ -292,7 +298,8 @@ class SeebeckMeasurement:
         T_avg = np.mean([np.mean(T1_avg), np.mean(T2_avg)])
         
         slope, adj_r2, offset, rmse, S_slope = fit_v1_v2_and_calculate_seebeck(
-            V1_avg, V2_avg, T_avg, plot=True
+            V1_avg, V2_avg, T_avg, plot=True, save_plot=True, 
+            filename=filename, output_folder=output_folder
         )
         
         print(f"\n{'='*60}")
@@ -307,7 +314,7 @@ class SeebeckMeasurement:
         
         results = {
             'T_avg': T_avg,
-            'S_slope': S_slope,
+            'Seebeck': S_slope,
             'slope': slope,
             'adj_r_square': adj_r2,
             'offset': offset,

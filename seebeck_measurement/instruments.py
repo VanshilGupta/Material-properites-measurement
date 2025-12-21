@@ -5,6 +5,8 @@ from typing import List
 import numpy as np
 import sys
 from pathlib import Path
+
+from seebeck_measurement.config import DAQ_CHANNELS
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from constants import DAQ_RESOURCE, PS_RESOURCE, DAQ_TIMEOUT
 
@@ -94,7 +96,7 @@ class DAQController(InstrumentInterface):
         values = [float(x) for x in response.strip().split(',')]
         return values[1], values[4]  # T_ref1, T_ref2
     
-    def read_voltages(self, channels: List[int] = None) -> np.ndarray:
+    def read_voltages(self, channels: List[int]=DAQ_CHANNELS) -> np.ndarray:
         """
         Read voltages from specified channels.
         
@@ -104,8 +106,6 @@ class DAQController(InstrumentInterface):
         Returns:
             Array of voltage readings in volts
         """
-        if channels is None:
-            channels = [101, 106, 111, 116, 111, 106, 101]
         
         # Configure scan
         self.write('*RST')

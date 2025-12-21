@@ -43,7 +43,10 @@ def fit_v1_v2_and_calculate_seebeck(
     V1: np.ndarray,
     V2: np.ndarray,
     temperature: float,
-    plot: bool = True
+    plot: bool = True,
+    save_plot: bool = True,
+    filename: str = None,
+    output_folder: str = None
 ) -> Tuple[float, float, float, float, float]:
     """
     Fit V2 vs V1 and calculate sample Seebeck coefficient.
@@ -52,6 +55,9 @@ def fit_v1_v2_and_calculate_seebeck(
         V1, V2: Voltage arrays (in volts)
         temperature: Average temperature in Celsius
         plot: Whether to generate plot
+        save_plot: Whether to save the plot to file
+        filename: Base filename for saved plot (without extension)
+        output_folder: Output directory for saved plot
         
     Returns:
         Tuple of (slope, adj_r_square, offset, rmse, S_sample)
@@ -100,6 +106,23 @@ def fit_v1_v2_and_calculate_seebeck(
                 verticalalignment='top', bbox=props, fontweight='bold')
         
         plt.tight_layout()
+        
+        # Save plot if requested
+        if save_plot and filename:
+            from pathlib import Path
+            
+            if output_folder is None:
+                # Default to seebeck_data/plots/ folder next to the code files
+                code_dir = Path(__file__).parent.parent
+                save_folder = code_dir / 'seebeck_data' / 'plots'
+            else:
+                save_folder = Path(output_folder) / 'plots'
+            
+            save_folder.mkdir(parents=True, exist_ok=True)
+            filepath = save_folder / f'{filename}_fit.png'
+            fig.savefig(filepath, dpi=300, bbox_inches='tight')
+            print(f"💾 Fit plot saved: {filepath}")
+        
         plt.show()
     
     return slope, adj_r_square, intercept, rmse, S_sample
