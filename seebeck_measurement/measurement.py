@@ -106,7 +106,7 @@ class SeebeckMeasurement:
             'T1': [T1_1, T1_2],
             'T2': [T2_1, T2_2],
             'V1': [V1_1, V1_2],
-            'V2': [V2_1, V2_2]
+            'V2': [V2_1, V2_1]
         }
     
     def control_heaters(self, elapsed_time: float, seebeck_meas_time: float):

@@ -35,8 +35,8 @@ PS_SERIAL = '805224014787570003'
 # ============================================================================
 
 # Default sample dimensions
-DEFAULT_SAMPLE_THICKNESS = 2.3  # mm
-DEFAULT_SAMPLE_DIAMETER = 12.65  # mm
+DEFAULT_SAMPLE_THICKNESS = 2.1  # mm
+DEFAULT_SAMPLE_DIAMETER = 15  # mm
 
 # Known resistor value for current measurement (Ohms)
 KNOWN_RESISTOR = 0.1029
