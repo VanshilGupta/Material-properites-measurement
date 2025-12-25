@@ -14,9 +14,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from constants import (
     DAQ_RESOURCE, 
     PS_RESOURCE, 
-    PS_VENDOR_ID, 
-    PS_PRODUCT_ID, 
-    PS_SERIAL,
     DAQ_TIMEOUT,
     DAQ_NPLC,
     DAQ_VOLTAGE_RANGE
