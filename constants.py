@@ -20,15 +20,6 @@ PS_RESOURCE = 'USB0::0x05E6::0x2230::805224014787570003::0::INSTR'
 # Instrument Vendor and Product IDs
 # ============================================================================
 
-# DAQ6510 Multimeter
-DAQ_VENDOR_ID = 0x05E6
-DAQ_PRODUCT_ID = 0x6510
-DAQ_SERIAL = '04619482'
-
-# Keithley 2230-30-1 Power Supply
-PS_VENDOR_ID = 0x05E6
-PS_PRODUCT_ID = 0x2230
-PS_SERIAL = '805224014787570003'
 
 # ============================================================================
 # Sigma (Conductivity) Measurement - Van der Pauw

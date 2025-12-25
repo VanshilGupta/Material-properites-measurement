@@ -6,7 +6,7 @@ import numpy as np
 import sys
 from pathlib import Path
 
-from seebeck_measurement.config import DAQ_CHANNELS
+from seebeck_measurement.config import DAQ_CHANNELS, HEATER_CURRENT, HEATER_VOLTAGE
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from constants import DAQ_RESOURCE, PS_RESOURCE, DAQ_TIMEOUT
 
@@ -227,7 +227,7 @@ class PowerSupplyController(InstrumentInterface):
         """Turn off all power supply outputs."""
         self.write(':OUTP:STAT OFF')
     
-    def configure_heater(self, channel: int, current: float = 0.3, voltage: float = 10.0):
+    def configure_heater(self, channel: int, current: float = HEATER_CURRENT, voltage: float = 10.0):
         """
         Configure and enable a heater channel.
         
@@ -251,11 +251,11 @@ class PowerSupplyController(InstrumentInterface):
         self.write('*RST')
         
         if heater_num == 1:
-            self.configure_heater(1, current=0.3, voltage=10.0)
+            self.configure_heater(1, current=HEATER_CURRENT, voltage=HEATER_VOLTAGE)
             self.configure_heater(2, current=0.0, voltage=0.0)
         elif heater_num == 2:
             self.configure_heater(1, current=0.0, voltage=0.0)
-            self.configure_heater(2, current=0.3, voltage=10.0)
+            self.configure_heater(2, current=HEATER_CURRENT, voltage=HEATER_VOLTAGE)
         
         self.configure_heater(3, current=0.0, voltage=0.0)
         self.write(':OUTP:STAT ON')

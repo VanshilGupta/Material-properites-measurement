@@ -4,6 +4,8 @@ import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
 import numpy as np
 from typing import Optional
+import time
+from pathlib import Path
 
 
 class SeebeckPlotter:
@@ -94,7 +96,10 @@ class SeebeckPlotter:
             filename: Base filename (without extension)
             output_folder: Output directory (default: seebeck_data/plots/ next to code)
         """
-        from pathlib import Path
+        
+        
+        # Hold the final plot for 5 seconds before saving and closing
+        time.sleep(5)
         
         if output_folder is None:
             # Default to seebeck_data/plots/ folder next to the code files
