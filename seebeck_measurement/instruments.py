@@ -129,7 +129,7 @@ class DAQController(InstrumentInterface):
         # Get readings with relative time
         raw_data = self.query(f'TRAC:DATA? 1,{num_readings},"defbuffer1", READ, REL')
         values = raw_data.strip().split(',')
-        
+        print('*'*10, ' ', 'raw data', values, ' ', '*'*10)
         voltages = []
         rel_times = []
         for i in range(0, len(values), 2):
