@@ -10,11 +10,14 @@ Author: Converted from MATLAB
 Date: 2025-11-01
 """
 
+import logging
 import pyvisa
 import numpy as np
 from scipy.optimize import brentq
 import time
 import traceback
+from pathlib import Path
+from datetime import datetime
 from constants import (
     DAQ_RESOURCE,
     PS_RESOURCE,
@@ -25,7 +28,7 @@ from constants import (
 )
 
 
-def measure_sigma(sample_t=None, sample_dia=None, verbose=True):
+def measure_sigma(sample_t=None, sample_dia=None, verbose=True, logger=None):
     """
     Measure electrical conductivity using Van der Pauw method.
     
@@ -37,11 +40,19 @@ def measure_sigma(sample_t=None, sample_dia=None, verbose=True):
         Sample diameter in mm (default from constants: 12.65 mm)
     verbose : bool, optional
         Print detailed debug info (default: True)
+    logger : logging.Logger, optional
+        Logger instance for recording measurement events
     
     Returns:
     --------
     dict : Measurement results or None if failed
     """
+    
+    def _log(level: str, message: str):
+        """Log a message if logger is available."""
+        if logger:
+            log_method = getattr(logger, level, logger.info)
+            log_method(message)
     
     sigma_raw = np.zeros(5)  # Store 5 measurements
     
@@ -51,16 +62,21 @@ def measure_sigma(sample_t=None, sample_dia=None, verbose=True):
     if sample_dia is None:
         sample_dia = DEFAULT_SAMPLE_DIAMETER
     
+    _log('info', f"Starting sigma measurement with thickness={sample_t}mm, diameter={sample_dia}mm")
+    
     # Init resource manager
     try:
         rm = pyvisa.ResourceManager()
         if verbose:
             print("✓ PyVISA ResourceManager initialized")
+            _log('info', "PyVISA ResourceManager initialized")
             print(f"Available resources: {rm.list_resources()}")
+            _log('debug', f"Available resources: {rm.list_resources()}")
     except Exception as e:
         print(f"✗ FATAL: Cannot initialize PyVISA ResourceManager")
         print(f"  Error: {e}")
         print(f"  Solution: Install NI-VISA or pyvisa-py backend")
+        _log('error', f"FATAL: Cannot initialize PyVISA ResourceManager: {e}")
         return None
     
     if verbose:
@@ -85,29 +101,34 @@ def measure_sigma(sample_t=None, sample_dia=None, verbose=True):
         daq = rm.open_resource(DAQ_RESOURCE)
         if verbose:
             print(f"  ✓ Connected to DAQ: {DAQ_RESOURCE}")
+            _log('info', f"Connected to DAQ: {DAQ_RESOURCE}")
     except pyvisa.VisaIOError as e:
         print(f"✗ ERROR: Cannot connect to DAQ6510 Multimeter")
         print(f"  Resource: {DAQ_RESOURCE}")
         print(f"  Error code: {e.error_code}")
         print(f"  Error: {e}")
         print(f"  Solution: Check USB connection, verify resource string")
+        _log('error', f"Cannot connect to DAQ6510: {e}")
         return None
     except Exception as e:
         print(f"✗ ERROR: Unexpected error connecting to DAQ")
         print(f"  {type(e).__name__}: {e}")
         traceback.print_exc()
+        _log('error', f"Unexpected error connecting to DAQ: {e}")
         return None
     
     try:
         ps = rm.open_resource(PS_RESOURCE)
         if verbose:
             print(f"  ✓ Connected to Power Supply: {PS_RESOURCE}")
+            _log('info', f"Connected to Power Supply: {PS_RESOURCE}")
     except pyvisa.VisaIOError as e:
         print(f"✗ ERROR: Cannot connect to Power Supply")
         print(f"  Resource: {PS_RESOURCE}")
         print(f"  Error code: {e.error_code}")
         print(f"  Error: {e}")
         print(f"  Solution: Check USB connection, verify resource string")
+        _log('error', f"Cannot connect to Power Supply: {e}")
         if daq:
             daq.close()
         return None
@@ -115,6 +136,7 @@ def measure_sigma(sample_t=None, sample_dia=None, verbose=True):
         print(f"✗ ERROR: Unexpected error connecting to Power Supply")
         print(f"  {type(e).__name__}: {e}")
         traceback.print_exc()
+        _log('error', f"Unexpected error connecting to Power Supply: {e}")
         if daq:
             daq.close()
         return None
@@ -234,6 +256,7 @@ def measure_sigma(sample_t=None, sample_dia=None, verbose=True):
     for j in range(5):
         if verbose:
             print(f"\nIteration {j+1}/5:")
+        _log('info', f"Van der Pauw iteration {j+1}/5 starting")
         
         volt1, volt2, volt3, volt4 = None, None, None, None
         
@@ -524,11 +547,15 @@ def measure_sigma(sample_t=None, sample_dia=None, verbose=True):
         print("="*60)
         print(f"Raw sigma values: {sigma_raw}")
     
+    _log('info', "Processing measurement results...")
+    _log('debug', f"Raw sigma values: {sigma_raw}")
+    
     valid_sigma = sigma_raw[sigma_raw > 0]  # Filter valid measurements
     
     if len(valid_sigma) == 0:
         print("✗ FATAL: No valid measurements obtained")
         print("  Check instrument connections and channel configurations")
+        _log('error', "FATAL: No valid measurements obtained")
         return None
     
     sigma_avg = np.median(valid_sigma)  # Median (robust to outliers)
@@ -549,6 +576,10 @@ def measure_sigma(sample_t=None, sample_dia=None, verbose=True):
         print(f"✓ CORRECTED SIGMA: {corr_sigma:.2f} S/cm")
         print("="*60)
     
+    _log('info', f"Valid measurements: {len(valid_sigma)}/5")
+    _log('info', f"Corrected sigma: {corr_sigma:.2f} S/cm")
+    _log('debug', f"Median sigma: {sigma_avg:.2f}, Std dev: {std_dev:.4f}, Geometry correction: {error:.6f}")
+    
     results = {
         'corr_sigma': corr_sigma,
         'uncorr_sigma': uncorr_sigma,
@@ -562,6 +593,73 @@ def measure_sigma(sample_t=None, sample_dia=None, verbose=True):
     
     return results  
            
+
+
+def save_results_to_csv(results, sample_name, output_folder=None):
+    """
+    Save measurement results to CSV file in the output folder.
+    
+    Parameters:
+    -----------
+    results : dict
+        Results from measure_sigma()
+    sample_name : str
+        Name of the sample
+    output_folder : str
+        Output folder path (sample folder)
+    """
+    try:
+        if output_folder is None:
+            output_folder = Path.cwd()
+        else:
+            output_folder = Path(output_folder)
+        
+        output_folder.mkdir(parents=True, exist_ok=True)
+        
+        # Create timestamp for filename (Indian format: DDMMYYYY_HHMMSS)
+        timestamp = datetime.now().strftime("%d%m%Y_%H%M%S")
+        filename = f"{sample_name}_sigma_results.csv"
+        filepath = output_folder / filename
+        
+        # Prepare data
+        headers = [
+            'Sample Name',
+            'Timestamp',
+            'Corrected Sigma (S/cm)',
+            'Uncorrected Sigma (S/cm)',
+            'Standard Deviation',
+            'Current (A)',
+            'Sample Thickness (mm)',
+            'Sample Diameter (mm)',
+            'Valid Measurements',
+            'Raw Sigma Values'
+        ]
+        
+        raw_sigma_str = ';'.join([f"{s:.4f}" for s in results['sigma_raw']])
+        
+        data = [
+            sample_name,
+            timestamp,
+            f"{results['corr_sigma']:.6f}",
+            f"{results['uncorr_sigma']:.6f}",
+            f"{results['std_dev']:.6f}",
+            f"{results['current']:.6f}",
+            f"{results['sample_thickness']:.2f}",
+            f"{results['sample_diameter']:.2f}",
+            f"{results['valid_count']}",
+            raw_sigma_str
+        ]
+        
+        # Write to CSV
+        with open(filepath, 'w', encoding='utf-8') as f:
+            f.write(','.join(headers) + '\n')
+            f.write(','.join(data) + '\n')
+        
+        print(f"💾 Results saved to: {filepath}")
+        
+    except Exception as e:
+        print(f"✗ ERROR saving results to CSV: {type(e).__name__}: {e}")
+        traceback.print_exc()
 
 
 def save_to_excel(results, temperature, filename='conductivity_results.xlsx'):

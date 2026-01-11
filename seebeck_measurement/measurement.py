@@ -1,5 +1,6 @@
 """Main Seebeck coefficient measurement module."""
 
+import logging
 import numpy as np
 import time
 from .instruments import DAQController, PowerSupplyController
@@ -40,6 +41,21 @@ class SeebeckMeasurement:
         
         # Data storage
         self.reset_data()
+        
+        # Logger (will be set in run_measurement if provided)
+        self.logger = None
+    
+    def _log(self, level: str, message: str):
+        """
+        Log a message if logger is available.
+        
+        Args:
+            level: Log level ('debug', 'info', 'warning', 'error')
+            message: Message to log
+        """
+        if self.logger:
+            log_method = getattr(self.logger, level, self.logger.info)
+            log_method(message)
     
     def reset_data(self):
         """Reset all data arrays."""
@@ -159,7 +175,8 @@ class SeebeckMeasurement:
         self,
         filename: str = "SN2517",
         measurement_time: float = 480.0,
-        output_folder: str = None
+        output_folder: str = None,
+        logger: logging.Logger = None
     ) -> dict:
         """
         Run complete Seebeck measurement.
@@ -167,18 +184,26 @@ class SeebeckMeasurement:
         Args:
             filename: Base filename for output files
             measurement_time: Total measurement duration (seconds)
-            output_folder: Output directory for data files
+            output_folder: Output directory for data files (sample folder)
+            logger: Logger instance for recording measurement events
             
         Returns:
             Dictionary with measurement results
         """
+        # Set the logger for this measurement run
+        self.logger = logger
+        
         print(f"\n{'='*60}")
         print(f"Starting Seebeck Measurement: {filename}")
         print(f"Measurement time: {measurement_time}s ({measurement_time/60:.1f} min)")
         print(f"{'='*60}\n")
         
+        self._log('info', f"Measurement parameters: filename={filename}, time={measurement_time}s")
+        
         # Connect instruments
+        self._log('info', "Connecting to instruments...")
         self.connect_instruments()
+        self._log('info', "Instruments connected successfully")
         self.reset_data()
         
         start_time = time.time()
@@ -190,13 +215,29 @@ class SeebeckMeasurement:
                 # Read measurements
                 readings = self.read_measurement()
                 
-                # Store data (both readings per cycle)
-                for i in range(2):
-                    self.time_data.append(current_time)
-                    self.T1.append(readings['T1'][i])
-                    self.T2.append(readings['T2'][i])
-                    self.V1.append(readings['V1'][i])
-                    self.V2.append(readings['V2'][i])
+                # Print individual readings
+                reading_str = (f"  Readings: T1_1={readings['T1']['values'][0]:.3f}°C, "
+                      f"V1_1={readings['V1']['values'][0]:.6f}V, "
+                      f"T2_1={readings['T2']['values'][0]:.3f}°C, "
+                      f"V2={readings['V2']['values'][0]:.6f}V, "
+                      f"T2_2={readings['T2']['values'][1]:.3f}°C, "
+                      f"V1_2={readings['V1']['values'][1]:.6f}V, "
+                      f"T1_2={readings['T1']['values'][1]:.3f}°C")
+                print(reading_str)
+                self._log('debug', reading_str)
+                
+                # Store individual measurement data
+                self.T1_data['time'].append(readings['T1']['times'])
+                self.T1_data['values'].append(readings['T1']['values'])
+                
+                self.T2_data['time'].append(readings['T2']['times'])
+                self.T2_data['values'].append(readings['T2']['values'])
+                
+                self.V1_data['time'].append(readings['V1']['times'])
+                self.V1_data['values'].append(readings['V1']['values'])
+                
+                self.V2_data['time'].append(readings['V2']['times'])
+                self.V2_data['values'].append(readings['V2']['values'])
                 
                 # Update plot with first reading of the pair
                 if self.plotter:
@@ -209,26 +250,43 @@ class SeebeckMeasurement:
                     )
                 
                 # Control heaters
-                print(f"Phase: {self.phase}, Time: {current_time:.1f}s, "
-                      f"T1: {readings['T1'][0]:.2f}°C, T2: {readings['T2'][0]:.2f}°C, "
-                      f"ΔT: {abs(readings['T1'][0] - readings['T2'][0]):.2f}°C")
+                phase_str = (f"Phase: {self.phase}, Time: {current_time:.1f}s, "
+                      f"T1: {readings['T1_avg']:.2f}°C, T2: {readings['T2_avg']:.2f}°C, "
+                      f"ΔT: {abs(readings['T1_avg'] - readings['T2_avg']):.2f}°C")
+                print(phase_str)
+                self._log('debug', phase_str)
                 
                 self.control_heaters(current_time, measurement_time)
                 
                 # Check termination conditions
                 dt = abs(readings['T1'][0] - readings['T2'][0])
                 if dt > self.dt_max or current_time > measurement_time:
-                    print(f"\nMeasurement complete (ΔT={dt:.2f}°C, t={current_time:.1f}s)")
+                    complete_msg = f"Measurement complete (ΔT={dt:.2f}°C, t={current_time:.1f}s)"
+                    print(f"\n{complete_msg}")
+                    self._log('info', complete_msg)
                     break
                 
-                time.sleep(0.1)  # Small delay between readings
+                # Small delay between readings
+                time.sleep(PLOT_UPDATE_INTERVAL)
+        
+        except Exception as e:
+            self._log('error', f"Error during measurement loop: {e}")
+            raise
         
         finally:
             # Ensure heaters are off
+            self._log('info', "Turning off heaters and disconnecting instruments...")
             self.ps.turn_off_all_channels()
             self.disconnect_instruments()
+            self._log('info', "Instruments disconnected")
+            
+            # Save real-time plot before closing
+            if self.plotter:
+                self._log('info', "Saving real-time plot...")
+                self.plotter.save_plot(filename, output_folder)
         
         # Process and save data
+        self._log('info', "Processing and saving data...")
         results = self.process_and_save_data(filename, output_folder)
         
         return results
@@ -307,7 +365,8 @@ class SeebeckMeasurement:
         
         results = {
             'T_avg': T_avg,
-            'S_slope': S_slope,
+            'Seebeck': S_slope,
+            'S_slope': S_slope,  # Alias for backward compatibility
             'slope': slope,
             'adj_r_square': adj_r2,
             'offset': offset,

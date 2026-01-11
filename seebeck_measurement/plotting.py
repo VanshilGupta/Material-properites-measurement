@@ -86,6 +86,33 @@ class SeebeckPlotter:
         self.fig.canvas.flush_events()
         plt.pause(0.001)
     
+    def save_plot(self, filename: str, output_folder: str = None):
+        """
+        Save the current plot to file.
+        
+        Args:
+            filename: Base filename (without extension)
+            output_folder: Output directory (the sample folder where all data goes)
+        """
+        
+        
+        # Hold the final plot for 5 seconds before saving and closing
+        time.sleep(5)
+        
+        if output_folder is None:
+            # Default to seebeck_data/plots/ folder next to the code files (legacy behavior)
+            code_dir = Path(__file__).parent.parent
+            output_folder = code_dir / 'seebeck_data' / 'plots'
+        else:
+            # Use the provided folder directly (sample folder)
+            output_folder = Path(output_folder)
+        
+        output_folder.mkdir(parents=True, exist_ok=True)
+        
+        filepath = output_folder / f'{filename}_realtime.png'
+        self.fig.savefig(filepath, dpi=300, bbox_inches='tight')
+        print(f"💾 Real-time plot saved: {filepath}")
+    
     def close(self):
         """Close the plot."""
         plt.close(self.fig)

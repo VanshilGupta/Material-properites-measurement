@@ -56,12 +56,17 @@ def save_to_csv(
         filename: Output filename
         data: 2D numpy array of data
         headers: List of column headers
-        folder: Output folder (optional)
+        folder: Output folder (the sample folder where all data goes)
     """
     import os
     
     if folder is None:
-        folder = os.path.join(os.path.expanduser('~'), 'seebeck_data')
+        # Default to seebeck_data/data/ folder next to the code files (legacy behavior)
+        code_dir = Path(__file__).parent.parent
+        folder = code_dir / 'seebeck_data' / 'data'
+    else:
+        # Use the provided folder directly (sample folder)
+        folder = Path(folder)
     
     os.makedirs(folder, exist_ok=True)
     
