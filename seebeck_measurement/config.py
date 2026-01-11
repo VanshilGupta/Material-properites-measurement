@@ -14,12 +14,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from constants import (
     DAQ_RESOURCE, 
     PS_RESOURCE, 
-    DAQ_VENDOR_ID, 
-    DAQ_PRODUCT_ID, 
-    DAQ_SERIAL, 
-    PS_VENDOR_ID, 
-    PS_PRODUCT_ID, 
-    PS_SERIAL,
     DAQ_TIMEOUT,
     DAQ_NPLC,
     DAQ_VOLTAGE_RANGE
@@ -50,10 +44,8 @@ HEATER_CURRENT = 0.3
 HEATER_VOLTAGE = 10.0
 
 # Heater ON duration at start (seconds)
-HEATER_INITIAL_DURATION = 60
+HEATER_ON_DURATION= 60
 
-# Heater ON duration at reversal (seconds)
-HEATER_REVERSAL_DURATION = 60
 
 # ============================================================================
 # DAQ Configuration - Seebeck Specific
@@ -61,7 +53,9 @@ HEATER_REVERSAL_DURATION = 60
 
 # Channel mapping for voltage readings
 # Order: [U1_1, V1_1, U2_1, V2_1, U2_2, V1_2, U1_2]
-DAQ_CHANNELS = [101, 106, 111, 116, 111, 106, 101]
+DAQ_CHANNELS = [101, 106, 
+
+111, 116, 111, 106, 101]
 
 # Note: DAQ_NPLC, DAQ_VOLTAGE_RANGE, and DAQ_TIMEOUT are imported from root constants.py
 
@@ -71,12 +65,6 @@ DAQ_CHANNELS = [101, 106, 111, 116, 111, 106, 101]
 
 # Default output folder (None = ~/seebeck_data/)
 OUTPUT_FOLDER = None
-
-# Save raw data
-SAVE_RAW_DATA = True
-
-# Save averaged data
-SAVE_AVERAGED_DATA = True
 
 # ============================================================================
 # Plotting Configuration
@@ -94,9 +82,6 @@ FIGURE_SIZE = (10, 8)
 # ============================================================================
 # Analysis Configuration
 # ============================================================================
-
-# Enable curve fitting plot
-SHOW_FIT_PLOT = True
 
 # Curve fit method ('bisquare' for robust fitting)
 FIT_METHOD = 'bisquare'

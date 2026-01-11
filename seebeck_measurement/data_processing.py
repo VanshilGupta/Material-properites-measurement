@@ -58,21 +58,20 @@ def save_to_csv(
         headers: List of column headers
         folder: Output folder (the sample folder where all data goes)
     """
-    import os
+    from pathlib import Path
     
     if folder is None:
-        # Default to seebeck_data/data/ folder next to the code files (legacy behavior)
+        # Default to seebeck_data/data/ folder next to the code files
         code_dir = Path(__file__).parent.parent
         folder = code_dir / 'seebeck_data' / 'data'
     else:
-        # Use the provided folder directly (sample folder)
-        folder = Path(folder)
+        folder = Path(folder) / 'data'
     
-    os.makedirs(folder, exist_ok=True)
+    folder.mkdir(parents=True, exist_ok=True)
     
-    filepath = os.path.join(folder, filename)
+    filepath = folder / filename
     
     header_str = ','.join(headers)
     np.savetxt(filepath, data, delimiter=',', header=header_str, comments='')
     
-    print(f'File saved to: {filepath}')
+    print(f'💾 Data saved to: {filepath}')

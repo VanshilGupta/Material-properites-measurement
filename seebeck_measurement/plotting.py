@@ -4,6 +4,8 @@ import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
 import numpy as np
 from typing import Optional
+import time
+from pathlib import Path
 
 
 class SeebeckPlotter:
@@ -29,7 +31,7 @@ class SeebeckPlotter:
         # Setup axes
         self.ax_temp.set_xlabel('Time (minutes)')
         self.ax_temp.set_ylabel('Temperature (°C)')
-        self.ax_temp.legend(loc='southwest')
+        self.ax_temp.legend(loc='upper right')
         self.ax_temp.grid(True)
         
         self.ax_volt.set_xlabel('Time (minutes)')

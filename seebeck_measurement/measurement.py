@@ -3,6 +3,8 @@
 import logging
 import numpy as np
 import time
+
+from seebeck_measurement.config import DAQ_CHANNELS, HEATER_ON_DURATION, MAX_SAMPLES, MAX_TEMP_DIFFERENCE, PLOT_UPDATE_INTERVAL
 from .instruments import DAQController, PowerSupplyController
 from .temperature_conversion import temp_to_voltage, voltage_to_temp
 from .data_processing import average_data, save_to_csv
@@ -36,8 +38,8 @@ class SeebeckMeasurement:
         self.plotter = SeebeckPlotter() if enable_plotting else None
         
         # Measurement parameters
-        self.max_samples = 500
-        self.dt_max = 8.0  # Maximum temperature difference (°C)
+        self.max_samples = MAX_SAMPLES
+        self.dt_max = MAX_TEMP_DIFFERENCE # Maximum temperature difference (°C)
         
         # Data storage
         self.reset_data()
@@ -59,11 +61,23 @@ class SeebeckMeasurement:
     
     def reset_data(self):
         """Reset all data arrays."""
+        # Individual measurement data with timestamps
+        # T1 has 2 readings per cycle (forward and backward)
+        self.T1_data = {'time': [], 'values': []}  # Each entry is [t1, t2] and [val1, val2]
+        # T2 has 2 readings per cycle (forward and backward)
+        self.T2_data = {'time': [], 'values': []}
+        # V1 has 2 readings per cycle (forward and backward)
+        self.V1_data = {'time': [], 'values': []}
+        # V2 has 1 reading per cycle (center)
+        self.V2_data = {'time': [], 'values': []}
+        
+        # Legacy format for compatibility
         self.time_data = []
         self.T1 = []
         self.T2 = []
         self.V1 = []
         self.V2 = []
+        
         self.phase = 1
         self.GH1_active = False
         self.GH2_active = False
@@ -85,9 +99,79 @@ class SeebeckMeasurement:
         self.daq.disconnect()
         print("All instruments disconnected")
     
+    def read_measurement_with_timestamps(self, start_time: float) -> dict:
+        """
+        Read one complete measurement cycle with individual timestamps.
+        
+        Args:
+            start_time: Reference start time for relative timestamps
+        
+        Returns:
+            Dictionary with temperature and voltage readings plus timestamps
+        """
+        # Get reference temperatures
+        T_ref1, T_ref2 = self.daq.get_reference_temperatures()
+        V_ref1 = temp_to_voltage(T_ref1)  # mV
+        V_ref2 = temp_to_voltage(T_ref2)  # mV
+        
+        # Read voltages from DAQ with timestamps
+        result = self.daq.read_voltages_with_timestamps(DAQ_CHANNELS)
+        voltages = result['voltages']
+        rel_times = result['rel_times']  # Relative times within scan
+        
+        # Capture current time for this scan
+        scan_time = time.time() - start_time
+        
+        # Process readings
+        # voltages order: [101, 106, 111, 116, 111, 106, 101]
+        # Corresponds to: [U1_1, V1_1, U2_1, V2, U2_2, V1_2, U1_2]
+        # rel_times[i] is relative time of each reading within the scan
+        
+        U1_1 = voltages[0] * 1e3  # Convert to mV
+        V1_1 = voltages[1]
+        U2_1 = voltages[2] * 1e3
+        V2_1 = voltages[3]
+        U2_2 = voltages[4] * 1e3
+        V1_2 = voltages[5]
+        U1_2 = voltages[6] * 1e3
+        
+        # Calculate absolute timestamps for each measurement
+        # rel_times are relative to start of scan, scan_time is when scan started
+        t_U1_1 = scan_time + rel_times[0]
+        t_V1_1 = scan_time + rel_times[1]
+        t_U2_1 = scan_time + rel_times[2]
+        t_V2 = scan_time + rel_times[3]   # V2 center time
+        t_U2_2 = scan_time + rel_times[4]
+        t_V1_2 = scan_time + rel_times[5]
+        t_U1_2 = scan_time + rel_times[6]
+        
+        # Convert to temperatures
+        T1_1 = voltage_to_temp(U1_1 + V_ref1)
+        T2_1 = voltage_to_temp(U2_1 + V_ref2)
+        T1_2 = voltage_to_temp(U1_2 + V_ref1)
+        T2_2 = voltage_to_temp(U2_2 + V_ref2)
+        
+        return {
+            # Temperature 1: two readings with their timestamps
+            'T1': {'times': [t_U1_1, t_U1_2], 'values': [T1_1, T1_2]},
+            # Temperature 2: two readings with their timestamps
+            'T2': {'times': [t_U2_1, t_U2_2], 'values': [T2_1, T2_2]},
+            # Voltage 1: two readings with their timestamps
+            'V1': {'times': [t_V1_1, t_V1_2], 'values': [V1_1, V1_2]},
+            # Voltage 2: single reading (duplicated for averaging)
+            'V2': {'times': [t_V2], 'values': [V2_1]},
+            # V2 center time for averaged data
+            'center_time': t_V2,
+            # Averaged values at center time
+            'T1_avg': (T1_1 + T1_2) / 2,
+            'T2_avg': (T2_1 + T2_2) / 2,
+            'V1_avg': (V1_1 + V1_2) / 2,
+            'V2_avg': V2_1,
+        }
+    
     def read_measurement(self) -> dict:
         """
-        Read one complete measurement cycle.
+        Read one complete measurement cycle (legacy method).
         
         Returns:
             Dictionary with temperature and voltage readings
@@ -98,7 +182,7 @@ class SeebeckMeasurement:
         V_ref2 = temp_to_voltage(T_ref2)  # mV
         
         # Read voltages from DAQ
-        voltages = self.daq.read_voltages()
+        voltages = self.daq.read_voltages(DAQ_CHANNELS)
         
         # Process readings
         # voltages order: [101, 106, 111, 116, 111, 106, 101]
@@ -122,7 +206,7 @@ class SeebeckMeasurement:
             'T1': [T1_1, T1_2],
             'T2': [T2_1, T2_2],
             'V1': [V1_1, V1_2],
-            'V2': [V2_1, V2_2]
+            'V2': [V2_1, V2_1],
         }
     
     def control_heaters(self, elapsed_time: float, seebeck_meas_time: float):
@@ -147,7 +231,7 @@ class SeebeckMeasurement:
                     self.ps.enable_heater(2)
                     self.GH2_active = True
             
-            if elapsed_time > 60:
+            if elapsed_time > HEATER_ON_DURATION:
                 self.phase = 2
                 self.ps.turn_off_all_channels()
         
@@ -167,7 +251,7 @@ class SeebeckMeasurement:
                 self.ps.enable_heater(1)
                 self.GH2_active = False
             
-            if elapsed_time > half_time + 60:
+            if elapsed_time > half_time + HEATER_ON_DURATION:
                 self.phase = 4
                 self.ps.turn_off_all_channels()
     
@@ -212,8 +296,8 @@ class SeebeckMeasurement:
             while True:
                 current_time = time.time() - start_time
                 
-                # Read measurements
-                readings = self.read_measurement()
+                # Read measurements with individual timestamps
+                readings = self.read_measurement_with_timestamps(start_time)
                 
                 # Print individual readings
                 reading_str = (f"  Readings: T1_1={readings['T1']['values'][0]:.3f}°C, "
@@ -239,14 +323,21 @@ class SeebeckMeasurement:
                 self.V2_data['time'].append(readings['V2']['times'])
                 self.V2_data['values'].append(readings['V2']['values'])
                 
-                # Update plot with first reading of the pair
+                # Store averaged data at center time
+                self.time_data.append(readings['center_time'])
+                self.T1.append(readings['T1_avg'])
+                self.T2.append(readings['T2_avg'])
+                self.V1.append(readings['V1_avg'])
+                self.V2.append(readings['V2_avg'])
+                
+                # Update plot with averaged values
                 if self.plotter:
                     self.plotter.update(
-                        current_time,
-                        readings['T1'][0],
-                        readings['T2'][0],
-                        readings['V1'][0],
-                        readings['V2'][0]
+                        readings['center_time'],
+                        readings['T1_avg'],
+                        readings['T2_avg'],
+                        readings['V1_avg'],
+                        readings['V2_avg']
                     )
                 
                 # Control heaters
@@ -259,7 +350,7 @@ class SeebeckMeasurement:
                 self.control_heaters(current_time, measurement_time)
                 
                 # Check termination conditions
-                dt = abs(readings['T1'][0] - readings['T2'][0])
+                dt = abs(readings['T1_avg'] - readings['T2_avg'])
                 if dt > self.dt_max or current_time > measurement_time:
                     complete_msg = f"Measurement complete (ΔT={dt:.2f}°C, t={current_time:.1f}s)"
                     print(f"\n{complete_msg}")
@@ -297,8 +388,12 @@ class SeebeckMeasurement:
         output_folder: str = None
     ) -> dict:
         """
-        Process measurements and save results.
+        Process measurements and save results to files.
         
+        Creates:
+            - {filename}_all.csv: All 7 readings with individual timestamps per cycle
+            - {filename}_averaged.csv: All values averaged at V2 center time
+            
         Args:
             filename: Base filename for output
             output_folder: Output directory
@@ -308,49 +403,78 @@ class SeebeckMeasurement:
         """
         print("\nProcessing data...")
         
-        # Convert to numpy arrays
+        # Create single file with all 7 readings per cycle
+        num_cycles = len(self.T1_data['time'])
+        all_data = []
+        
+        for i in range(num_cycles):
+            # Extract times and values for this cycle
+            t_T1_1, t_T1_2 = self.T1_data['time'][i]
+            T1_1, T1_2 = self.T1_data['values'][i]
+            
+            t_V1_1, t_V1_2 = self.V1_data['time'][i]
+            V1_1, V1_2 = self.V1_data['values'][i]
+            
+            t_T2_1, t_T2_2 = self.T2_data['time'][i]
+            T2_1, T2_2 = self.T2_data['values'][i]
+            
+            t_V2 = self.V2_data['time'][i][0]
+            V2 = self.V2_data['values'][i][0]
+            
+            # Create row: t_T1_1, T1_1, _, t_V1_1, V1_1, _, t_T2_1, T2_1, _, t_V2, V2, _, t_T2_2, T2_2, _, t_V1_2, V1_2, _, t_T1_2, T1_2
+            row = [
+                t_T1_1, T1_1, np.nan,        # T1_1 with space
+                t_V1_1, V1_1*1e6, np.nan,    # V1_1 in µV with space
+                t_T2_1, T2_1, np.nan,        # T2_1 with space
+                t_V2, V2*1e6, np.nan,        # V2 in µV with space
+                t_T2_2, T2_2, np.nan,        # T2_2 with space
+                t_V1_2, V1_2*1e6, np.nan,    # V1_2 in µV with space
+                t_T1_2, T1_2                 # T1_2 (no trailing space)
+            ]
+            all_data.append(row)
+        
+        data_all = np.array(all_data)
+        headers_all = [
+            't_T1_1(s)', 'T1_1(°C)', '',
+            't_V1_1(s)', 'V1_1(µV)', '',
+            't_T2_1(s)', 'T2_1(°C)', '',
+            't_V2(s)', 'V2(µV)', '',
+            't_T2_2(s)', 'T2_2(°C)', '',
+            't_V1_2(s)', 'V1_2(µV)', '',
+            't_T1_2(s)', 'T1_2(°C)'
+        ]
+        save_to_csv(f'{filename}_all.csv', data_all, headers_all, output_folder)
+        print(f"  Saved {filename}_all.csv ({num_cycles} cycles with 7 readings each)")
+        
+        # Convert averaged data to numpy arrays
         time_array = np.array(self.time_data)
         T1_array = np.array(self.T1)
         T2_array = np.array(self.T2)
         V1_array = np.array(self.V1)
         V2_array = np.array(self.V2)
         
-        # Calculate temperature differences
-        DT = T1_array - T2_array
-        
-        # Save original data
-        min_len = min(len(DT), len(T1_array), len(T2_array), 
+        # Save averaged data (values at V2 center time)
+        min_len = min(len(T1_array), len(T2_array), 
                      len(V1_array), len(V2_array), len(time_array))
         
-        data_orig = np.column_stack([
-            DT[:min_len],
+        data_avg = np.column_stack([
+            time_array[:min_len],
             T1_array[:min_len],
             T2_array[:min_len],
-            V1_array[:min_len],
-            V2_array[:min_len],
-            time_array[:min_len]
+            V1_array[:min_len]*1e6,
+            V2_array[:min_len]*1e6
         ])
         
-        headers_orig = ['DT_Bottom', 'T1', 'T2', 'V1', 'V2', 't']
-        save_to_csv(f'{filename}-orig.csv', data_orig, headers_orig, output_folder)
+        headers_avg = ['t(s)', 'T1_avg(°C)', 'T2_avg(°C)', 'V1_avg(µV)', 'V2(µV)']
+        save_to_csv(f'{filename}_averaged.csv', data_avg, headers_avg, output_folder)
+        print(f"  Saved {filename}_averaged.csv ({min_len} averaged readings)")
         
-        # Average data
-        t_avg, T1_avg, T2_avg, V1_avg, V2_avg = average_data(
-            time_array, T1_array, T2_array, V1_array, V2_array
-        )
-        
-        DT_avg = T1_avg - T2_avg
-        
-        # Save averaged data
-        data_avg = np.column_stack([DT_avg, T1_avg, T2_avg, V1_avg, V2_avg, t_avg])
-        headers_avg = ['DT_Bttm_av', 'T1_av', 'T2_av', 'V1_av', 'V2_av', 't_av']
-        save_to_csv(f'{filename}-avg.csv', data_avg, headers_avg, output_folder)
-        
-        # Calculate Seebeck coefficient
-        T_avg = np.mean([np.mean(T1_avg), np.mean(T2_avg)])
+        # Calculate Seebeck coefficient using averaged data
+        T_avg = np.mean([np.mean(T1_array), np.mean(T2_array)])
         
         slope, adj_r2, offset, rmse, S_slope = fit_v1_v2_and_calculate_seebeck(
-            V1_avg, V2_avg, T_avg, plot=True
+            V1_array, V2_array, T_avg, plot=True, save_plot=True, 
+            filename=filename, output_folder=output_folder
         )
         
         print(f"\n{'='*60}")
@@ -371,7 +495,6 @@ class SeebeckMeasurement:
             'adj_r_square': adj_r2,
             'offset': offset,
             'rmse': rmse,
-            'data_orig': data_orig,
             'data_avg': data_avg
         }
         

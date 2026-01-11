@@ -5,6 +5,8 @@ from typing import List
 import numpy as np
 import sys
 from pathlib import Path
+
+from seebeck_measurement.config import DAQ_CHANNELS, HEATER_CURRENT, HEATER_VOLTAGE
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from constants import DAQ_RESOURCE, PS_RESOURCE, DAQ_TIMEOUT
 
@@ -94,9 +96,54 @@ class DAQController(InstrumentInterface):
         values = [float(x) for x in response.strip().split(',')]
         return values[1], values[4]  # T_ref1, T_ref2
     
-    def read_voltages(self, channels: List[int] = None) -> np.ndarray:
+    def read_voltages_with_timestamps(self, channels: List[int] = DAQ_CHANNELS) -> dict:
         """
-        Read voltages from specified channels.
+        Read voltages from specified channels with individual timestamps.
+        
+        Args:
+            channels: List of channel numbers (default: [101, 106, 111, 116, 111, 106, 101])
+                      Order: [U1_1, V1_1, U2_1, V2, U2_2, V1_2, U1_2]
+            
+        Returns:
+            Dictionary with 'voltages' array and 'timestamps' array
+        """
+        import time
+        
+        # Configure scan
+        self.write('*RST')
+        
+        # Setup scan list
+        channel_str = ','.join([str(ch) for ch in channels])
+        self.write(f'ROUT:SCAN (@{channel_str})')
+        self.write(f'SENS:FUNC "VOLT:DC", (@{channel_str})')
+        self.write(f'VOLT:RANG 1, (@{channel_str})')
+        self.write(f'VOLT:NPLC 5, (@{channel_str})')
+        
+        # Trigger measurement
+        self.write('INIT')
+        self.query('*OPC?')  # Wait for completion
+        
+        # Read data with relative timestamps from buffer
+        num_readings = len(channels)
+        
+        # Get readings with relative time
+        raw_data = self.query(f'TRAC:DATA? 1,{num_readings},"defbuffer1", READ, REL')
+        values = raw_data.strip().split(',')
+        print('*'*10, ' ', 'raw data', values, ' ', '*'*10)
+        voltages = []
+        rel_times = []
+        for i in range(0, len(values), 2):
+            voltages.append(float(values[i]))
+            rel_times.append(float(values[i + 1]))
+        
+        return {
+            'voltages': np.array(voltages),
+            'rel_times': np.array(rel_times)  # Relative times within this scan
+        }
+    
+    def read_voltages(self, channels: List[int]=DAQ_CHANNELS) -> np.ndarray:
+        """
+        Read voltages from specified channels (legacy method).
         
         Args:
             channels: List of channel numbers (default: [101, 106, 111, 116, 111, 106, 101])
@@ -104,8 +151,6 @@ class DAQController(InstrumentInterface):
         Returns:
             Array of voltage readings in volts
         """
-        if channels is None:
-            channels = [101, 106, 111, 116, 111, 106, 101]
         
         # Configure scan
         self.write('*RST')
@@ -182,7 +227,7 @@ class PowerSupplyController(InstrumentInterface):
         """Turn off all power supply outputs."""
         self.write(':OUTP:STAT OFF')
     
-    def configure_heater(self, channel: int, current: float = 0.3, voltage: float = 10.0):
+    def configure_heater(self, channel: int, current: float = HEATER_CURRENT, voltage: float = 10.0):
         """
         Configure and enable a heater channel.
         
@@ -206,11 +251,11 @@ class PowerSupplyController(InstrumentInterface):
         self.write('*RST')
         
         if heater_num == 1:
-            self.configure_heater(1, current=0.3, voltage=10.0)
+            self.configure_heater(1, current=HEATER_CURRENT, voltage=HEATER_VOLTAGE)
             self.configure_heater(2, current=0.0, voltage=0.0)
         elif heater_num == 2:
             self.configure_heater(1, current=0.0, voltage=0.0)
-            self.configure_heater(2, current=0.3, voltage=10.0)
+            self.configure_heater(2, current=HEATER_CURRENT, voltage=HEATER_VOLTAGE)
         
         self.configure_heater(3, current=0.0, voltage=0.0)
         self.write(':OUTP:STAT ON')
