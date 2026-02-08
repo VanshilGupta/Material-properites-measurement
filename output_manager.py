@@ -34,9 +34,9 @@ def get_unique_output_folder(sample_name: str, base_dir: str = None) -> Path:
         Path to the created output folder
     """
     if base_dir is None:
-        # Default to measurement_data folder next to the code files
+        # Default to 'data' folder next to the code files
         code_dir = Path(__file__).parent
-        base_dir = code_dir / 'measurement_data'
+        base_dir = code_dir / 'data'
     else:
         base_dir = Path(base_dir)
     
@@ -184,3 +184,222 @@ def create_output_structure(
     logger = setup_logging(output_folder, measurement_type, sample_name)
     
     return output_folder, logger
+
+
+# =============================================================================
+# Temperature Sweep Output Structure
+# =============================================================================
+
+def create_temp_sweep_structure(
+    sample_name: str,
+    base_dir: str = None
+) -> Tuple[Path, logging.Logger]:
+    """
+    Create output structure for temperature sweep measurements.
+    
+    Creates a hierarchical folder structure:
+    data/
+    └── SampleX/
+        ├── global_log.log
+        ├── SampleX_Sigma_vs_Temp.csv
+        ├── SampleX_Seebeck_vs_Temp.csv
+        ├── 100C/
+        │   ├── log.log
+        │   ├── Sigma/
+        │   └── Seebeck/
+        └── ...
+    
+    Args:
+        sample_name: Name of the sample
+        base_dir: Base directory (default: measurement_data/)
+    
+    Returns:
+        Tuple of (sample_folder_path, global_logger)
+    """
+    sample_folder = get_unique_output_folder(sample_name, base_dir)
+    global_logger = setup_global_logger(sample_folder, sample_name)
+    
+    return sample_folder, global_logger
+
+
+def setup_global_logger(
+    sample_folder: Path,
+    sample_name: str
+) -> logging.Logger:
+    """
+    Set up global logger for temperature sweep.
+    
+    This logger records high-level events across all temperatures.
+    
+    Args:
+        sample_folder: Path to sample folder
+        sample_name: Name of the sample
+    
+    Returns:
+        Configured global logger
+    """
+    log_filepath = sample_folder / "global_log.log"
+    
+    # Create unique logger name
+    timestamp = datetime.now().strftime("%d%m%Y_%H%M%S")
+    logger_name = f"global_{sample_name}_{timestamp}"
+    logger = logging.getLogger(logger_name)
+    logger.setLevel(logging.DEBUG)
+    
+    # Clear existing handlers
+    logger.handlers.clear()
+    
+    # File handler
+    file_handler = logging.FileHandler(log_filepath, encoding='utf-8')
+    file_handler.setLevel(logging.DEBUG)
+    file_format = logging.Formatter(
+        '%(asctime)s | %(levelname)-8s | %(message)s',
+        datefmt='%d-%m-%Y %H:%M:%S'
+    )
+    file_handler.setFormatter(file_format)
+    logger.addHandler(file_handler)
+    
+    # Console handler
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.INFO)
+    console_format = logging.Formatter('[%(levelname)s] %(message)s')
+    console_handler.setFormatter(console_format)
+    logger.addHandler(console_handler)
+    
+    # Log header
+    logger.info("=" * 60)
+    logger.info("TEMPERATURE SWEEP MEASUREMENT LOG")
+    logger.info("=" * 60)
+    logger.info(f"Sample: {sample_name}")
+    logger.info(f"Output Folder: {sample_folder}")
+    logger.info(f"Start Time: {datetime.now().strftime('%d-%m-%Y %H:%M:%S')}")
+    logger.info("=" * 60)
+    
+    return logger
+
+
+def create_temperature_folder(
+    sample_folder: Path,
+    temperature: float,
+    measurement_types: list = None
+) -> Tuple[Path, logging.Logger]:
+    """
+    Create folder structure for a specific temperature measurement.
+    
+    Args:
+        sample_folder: Parent sample folder
+        temperature: Temperature in °C
+        measurement_types: List of measurement types ['Sigma', 'Seebeck']
+    
+    Returns:
+        Tuple of (temp_folder_path, temp_logger)
+    """
+    # Create temperature folder (e.g., "100C")
+    temp_folder_name = f"{int(temperature)}C"
+    temp_folder = sample_folder / temp_folder_name
+    temp_folder.mkdir(parents=True, exist_ok=True)
+    
+    # Create subfolders for each measurement type
+    if measurement_types is None:
+        measurement_types = ['Sigma', 'Seebeck']
+    
+    for mtype in measurement_types:
+        (temp_folder / mtype).mkdir(parents=True, exist_ok=True)
+    
+    # Setup local logger for this temperature
+    temp_logger = setup_temperature_logger(temp_folder, temperature)
+    
+    return temp_folder, temp_logger
+
+
+def setup_temperature_logger(
+    temp_folder: Path,
+    temperature: float
+) -> logging.Logger:
+    """
+    Set up logger for a specific temperature measurement.
+    
+    Args:
+        temp_folder: Temperature folder path
+        temperature: Temperature in °C
+    
+    Returns:
+        Configured logger for this temperature
+    """
+    log_filepath = temp_folder / "log.log"
+    
+    # Create unique logger name
+    timestamp = datetime.now().strftime("%d%m%Y_%H%M%S")
+    logger_name = f"temp_{int(temperature)}C_{timestamp}"
+    logger = logging.getLogger(logger_name)
+    logger.setLevel(logging.DEBUG)
+    
+    # Clear existing handlers
+    logger.handlers.clear()
+    
+    # File handler only (console handled by global logger)
+    file_handler = logging.FileHandler(log_filepath, encoding='utf-8')
+    file_handler.setLevel(logging.DEBUG)
+    file_format = logging.Formatter(
+        '%(asctime)s | %(levelname)-8s | %(message)s',
+        datefmt='%d-%m-%Y %H:%M:%S'
+    )
+    file_handler.setFormatter(file_format)
+    logger.addHandler(file_handler)
+    
+    # Log header
+    logger.info("=" * 60)
+    logger.info(f"MEASUREMENT AT {temperature}°C")
+    logger.info("=" * 60)
+    logger.info(f"Start Time: {datetime.now().strftime('%d-%m-%Y %H:%M:%S')}")
+    logger.info("=" * 60)
+    
+    return logger
+
+
+def create_single_measurement_structure(
+    sample_name: str,
+    measurement_type: str,
+    base_dir: str = None,
+    temperature: float = None
+) -> Tuple[Path, logging.Logger, Path, logging.Logger, Path]:
+    """
+    Create folder structure for single measurement (no temperature sweep).
+    
+    Structure:
+    data/
+    └── SampleX/
+        ├── global_log.log
+        ├── 28C/ (or whatever the actual temperature is)
+        │   ├── log.log
+        │   └── Sigma/ or Seebeck/
+    
+    Args:
+        sample_name: Name of the sample
+        measurement_type: 'sigma' or 'seebeck'
+        base_dir: Base directory
+        temperature: Current temperature in Celsius (defaults to 25°C if None)
+    
+    Returns:
+        Tuple of (sample_folder, global_logger, temp_folder, temp_logger, mtype_folder)
+    """
+    sample_folder = get_unique_output_folder(sample_name, base_dir)
+    global_logger = setup_global_logger(sample_folder, sample_name)
+    
+    # Use actual temperature for folder name, default to 25°C if not provided
+    if temperature is None:
+        temperature = 25.0
+    
+    # Create temperature-specific folder (e.g., "28C" instead of "RoomTemp")
+    temp_folder = sample_folder / f"{int(round(temperature))}C"
+    temp_folder.mkdir(parents=True, exist_ok=True)
+    
+    # Create measurement subfolder
+    mtype_folder = temp_folder / measurement_type.capitalize()
+    mtype_folder.mkdir(parents=True, exist_ok=True)
+    
+    # Setup local logger
+    temp_logger = setup_temperature_logger(temp_folder, temperature)
+    
+    return sample_folder, global_logger, temp_folder, temp_logger, mtype_folder
+
