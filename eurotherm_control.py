@@ -97,6 +97,9 @@ class EurothermController:
     REG_RAMP_RATE = 35         # Setpoint ramp rate (°C/min)
     REG_AUTO_MANUAL = 273      # Auto/Manual mode (0=Auto, 1=Manual)
     
+    # MODBUS RTU inter-frame delay (3.5 char times at 9600 baud ≈ 3.6 ms)
+    MODBUS_INTER_FRAME_DELAY = 0.004  # seconds
+    
     def __init__(
         self,
         com_port: int = 5,
@@ -144,6 +147,7 @@ class EurothermController:
         """
         try:
             port_name = f"COM{self.com_port}"
+            print(f"\n[DEBUG CONNECT] Opening {port_name} | baud={self.baud_rate} | 8N1 | timeout={self.timeout}s")
             self.serial = serial.Serial(
                 port=port_name,
                 baudrate=self.baud_rate,
@@ -153,19 +157,26 @@ class EurothermController:
                 timeout=self.timeout
             )
             self._connected = True
+            print(f"[DEBUG CONNECT] Serial port opened successfully: {self.serial.is_open}")
             self._log('info', f"Connected to Eurotherm on {port_name}")
             
             # Verify connection by reading temperature
+            print(f"[DEBUG CONNECT] Attempting to read temperature to verify connection...")
             temp = self.read_temperature()
             if temp is not None:
                 self._log('info', f"Current temperature: {temp:.1f}°C")
+                print(f"[DEBUG CONNECT] ✓ Connection verified — temp = {temp:.2f}°C")
                 return True
             else:
                 self._log('warning', "Connected but could not read temperature")
+                print(f"[DEBUG CONNECT] ✗ Port opened but read_temperature() returned None!")
+                print(f"[DEBUG CONNECT]   This means the Eurotherm did not respond or sent bad data.")
+                print(f"[DEBUG CONNECT]   Check: device address ({self.device_address}), wiring, baud rate.")
                 return True
                 
         except serial.SerialException as e:
             self._log('error', f"Failed to connect to COM{self.com_port}: {e}")
+            print(f"[DEBUG CONNECT] ✗ SerialException: {e}")
             self._connected = False
             return False
     
@@ -205,12 +216,17 @@ class EurothermController:
             return None
         
         # Build MODBUS request: [addr, func(3), reg_hi, reg_lo, count_hi, count_lo]
+        # Eurotherm parameter addresses are sent as-is (no subtraction)
+        # per the MATLAB tempobjcomm reference implementation
         request = struct.pack('>BBHH', 
                               self.device_address, 
                               3,  # Function code: Read Holding Registers
-                              register - 1,  # Eurotherm uses 1-based addressing
+                              register,
                               count)
         request = append_crc16(request)
+        
+        print(f"[DEBUG _read_registers] register={register}, count={count}")
+        print(f"[DEBUG _read_registers] TX ({len(request)} bytes): {request.hex(' ')}")
         
         try:
             self._flush()
@@ -221,10 +237,20 @@ class EurothermController:
             response_len = 5 + count * 2
             response = self.serial.read(response_len)
             
+            print(f"[DEBUG _read_registers] RX ({len(response)}/{response_len} bytes): {response.hex(' ') if response else '(empty)'}")
+            
             if len(response) < response_len:
+                print(f"[DEBUG _read_registers] ✗ FAIL: Response too short ({len(response)} < {response_len})")
                 return None
             
             if not verify_crc16(response):
+                print(f"[DEBUG _read_registers] ✗ FAIL: CRC check failed")
+                return None
+            
+            # Check for Eurotherm error response (function code + 0x80)
+            if len(response) >= 2 and response[1] == (3 + 0x80):
+                error_code = response[2] if len(response) >= 3 else -1
+                print(f"[DEBUG _read_registers] ✗ FAIL: Eurotherm error response, error code={error_code}")
                 return None
             
             # Parse values (big-endian 16-bit integers)
@@ -234,11 +260,15 @@ class EurothermController:
                 value = struct.unpack('>H', response[offset:offset+2])[0]
                 values.append(value)
             
+            print(f"[DEBUG _read_registers] ✓ OK: values={values}")
             return values
             
         except Exception as e:
+            print(f"[DEBUG _read_registers] ✗ EXCEPTION: {e}")
             self._log('debug', f"Read error: {e}")
             return None
+        finally:
+            time.sleep(self.MODBUS_INTER_FRAME_DELAY)
     
     def _read_float(self, register: int) -> Optional[float]:
         """
@@ -256,15 +286,20 @@ class EurothermController:
             return None
         
         # Full resolution address calculation (from MATLAB code)
+        # Address = parameterAddress * 2 + 0x8000 (sent as-is, no subtraction)
         full_res_addr = register * 2 + 0x8000
+        
+        print(f"[DEBUG _read_float] register={register}, full_res_addr=0x{full_res_addr:04X}")
         
         # Build request for 2 registers (4 bytes = 1 float)
         request = struct.pack('>BBHH',
                               self.device_address,
                               3,  # Read Holding Registers
-                              full_res_addr - 1,
+                              full_res_addr,
                               2)  # Read 2 registers for float
         request = append_crc16(request)
+        
+        print(f"[DEBUG _read_float] TX ({len(request)} bytes): {request.hex(' ')}")
         
         try:
             self._flush()
@@ -273,21 +308,38 @@ class EurothermController:
             # Response: addr(1) + func(1) + count(1) + data(4) + crc(2) = 9 bytes
             response = self.serial.read(9)
             
+            print(f"[DEBUG _read_float] RX ({len(response)}/9 bytes): {response.hex(' ') if response else '(empty)'}")
+            
             if len(response) < 9:
+                print(f"[DEBUG _read_float] ✗ FAIL: Response too short ({len(response)} < 9) — Eurotherm did not reply or sent partial data")
+                if len(response) >= 2 and response[1] == (3 + 0x80):
+                    error_code = response[2] if len(response) >= 3 else -1
+                    print(f"[DEBUG _read_float] ✗ Eurotherm MODBUS error response! Error code={error_code} (2=invalid address, 3=invalid value)")
                 return None
             
             if not verify_crc16(response):
+                print(f"[DEBUG _read_float] ✗ FAIL: CRC mismatch — data corrupted in transit")
+                return None
+            
+            # Check for error response
+            if response[1] == (3 + 0x80):
+                error_code = response[2]
+                print(f"[DEBUG _read_float] ✗ FAIL: Eurotherm error code={error_code} (2=invalid address, 3=invalid value)")
                 return None
             
             # Extract 4 bytes and convert to float (big-endian)
             float_bytes = response[3:7]
             value = struct.unpack('>f', float_bytes)[0]
             
+            print(f"[DEBUG _read_float] ✓ OK: raw bytes={float_bytes.hex(' ')}, value={value:.4f}")
             return value
             
         except Exception as e:
+            print(f"[DEBUG _read_float] ✗ EXCEPTION: {e}")
             self._log('debug', f"Read float error: {e}")
             return None
+        finally:
+            time.sleep(self.MODBUS_INTER_FRAME_DELAY)
     
     def _write_float(self, register: int, value: float) -> bool:
         """
@@ -304,7 +356,10 @@ class EurothermController:
             return False
         
         # Full resolution address calculation
+        # Address = parameterAddress * 2 + 0x8000 (sent as-is, no subtraction)
         full_res_addr = register * 2 + 0x8000
+        
+        print(f"[DEBUG _write_float] register={register}, full_res_addr=0x{full_res_addr:04X}, value={value}")
         
         # Convert float to bytes (big-endian)
         float_bytes = struct.pack('>f', value)
@@ -314,11 +369,13 @@ class EurothermController:
         request = struct.pack('>BBHHB',
                               self.device_address,
                               16,  # Write Multiple Registers
-                              full_res_addr - 1,
+                              full_res_addr,
                               2,   # 2 registers
                               4)   # 4 bytes
         request += float_bytes
         request = append_crc16(request)
+        
+        print(f"[DEBUG _write_float] TX ({len(request)} bytes): {request.hex(' ')}")
         
         try:
             self._flush()
@@ -327,18 +384,32 @@ class EurothermController:
             # Response: addr(1) + func(1) + reg(2) + count(2) + crc(2) = 8 bytes
             response = self.serial.read(8)
             
+            print(f"[DEBUG _write_float] RX ({len(response)}/8 bytes): {response.hex(' ') if response else '(empty)'}")
+            
             if len(response) < 8:
+                print(f"[DEBUG _write_float] ✗ FAIL: Response too short ({len(response)} < 8)")
+                if len(response) >= 2 and response[1] == (16 + 0x80):
+                    error_code = response[2] if len(response) >= 3 else -1
+                    print(f"[DEBUG _write_float] ✗ Eurotherm error code={error_code}")
                 return False
             
-            return verify_crc16(response)
+            crc_ok = verify_crc16(response)
+            print(f"[DEBUG _write_float] {'✓ OK' if crc_ok else '✗ FAIL'}: CRC {'valid' if crc_ok else 'INVALID'}")
+            return crc_ok
             
         except Exception as e:
+            print(f"[DEBUG _write_float] ✗ EXCEPTION: {e}")
             self._log('debug', f"Write float error: {e}")
             return False
+        finally:
+            time.sleep(self.MODBUS_INTER_FRAME_DELAY)
     
     def _write_register(self, register: int, value: int) -> bool:
         """
-        Write a single register using MODBUS function code 6.
+        Write a single 16-bit register using MODBUS function code 16.
+        
+        Eurotherm recommends FC 16 (Write Multiple Registers) for all
+        write operations, matching the MATLAB tempobjcomm reference.
         
         Args:
             register: Register address
@@ -350,21 +421,36 @@ class EurothermController:
         if not self.is_connected():
             return False
         
-        request = struct.pack('>BBHH',
+        # FC 16: [addr, 16, reg_hi, reg_lo, count_hi, count_lo, byte_count, val_hi, val_lo]
+        # Address sent as-is (no subtraction), per MATLAB tempobjcomm
+        request = struct.pack('>BBHHBH',
                               self.device_address,
-                              6,  # Write Single Register
-                              register - 1,
+                              16,  # Write Multiple Registers (Eurotherm recommended)
+                              register,
+                              1,   # 1 register
+                              2,   # 2 bytes
                               value)
         request = append_crc16(request)
+        
+        print(f"[DEBUG _write_register] register={register}, value={value}")
+        print(f"[DEBUG _write_register] TX ({len(request)} bytes): {request.hex(' ')}")
         
         try:
             self._flush()
             self.serial.write(request)
             response = self.serial.read(8)
-            return len(response) >= 8 and verify_crc16(response)
+            
+            print(f"[DEBUG _write_register] RX ({len(response)}/8 bytes): {response.hex(' ') if response else '(empty)'}")
+            
+            ok = len(response) >= 8 and verify_crc16(response)
+            print(f"[DEBUG _write_register] {'✓ OK' if ok else '✗ FAIL'}")
+            return ok
         except Exception as e:
+            print(f"[DEBUG _write_register] ✗ EXCEPTION: {e}")
             self._log('debug', f"Write register error: {e}")
             return False
+        finally:
+            time.sleep(self.MODBUS_INTER_FRAME_DELAY)
     
     # -------------------------------------------------------------------------
     # High-Level Temperature Control Functions
