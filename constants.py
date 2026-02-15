@@ -43,11 +43,6 @@ DEFAULT_TEMP_STEP = 25.0     # °C
 DEFAULT_RAMP_RATE = 10.0     # °C/min
 
 # ============================================================================
-# Instrument Vendor and Product IDs
-# ============================================================================
-
-
-# ============================================================================
 # Sigma (Conductivity) Measurement - Van der Pauw
 # ============================================================================
 
@@ -83,3 +78,29 @@ DAQ_NPLC = 5
 
 # Voltage range (Volts)
 DAQ_VOLTAGE_RANGE = 1.0
+
+
+# ============================================================================
+# Shared Helpers
+# ============================================================================
+
+def read_current_temperature() -> float:
+    """
+    Read the current temperature from the DAQ thermocouple channel.
+
+    Returns:
+        Temperature in °C (defaults to 25.0 if reading fails).
+    """
+    try:
+        import pyvisa
+        rm = pyvisa.ResourceManager()
+        daq = rm.open_resource(DAQ_RESOURCE)
+        daq.write('ROUT:SCAN (@111)')
+        daq.write('SENS:FUNC "TEMP", (@111)')
+        daq.write('SENS:TEMP:TRAN TC')
+        daq.write('SENS:TEMP:TYPE K')
+        temp = float(daq.query('READ?').strip())
+        daq.close()
+        return temp
+    except Exception:
+        return 25.0

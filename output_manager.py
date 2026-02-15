@@ -111,15 +111,10 @@ def setup_logging(
     logger.addHandler(console_handler)
     
     # Log initial run information
-    logger.info("=" * 60)
-    logger.info(f"MEASUREMENT LOG STARTED")
-    logger.info("=" * 60)
-    logger.info(f"Measurement Type: {measurement_type.upper()}")
-    logger.info(f"Sample Name: {sample_name}")
-    logger.info(f"Output Folder: {output_folder}")
-    logger.info(f"Log File: {log_filepath}")
-    logger.info(f"Start Time: {datetime.now().strftime('%d-%m-%Y %H:%M:%S')}")
-    logger.info("=" * 60)
+    logger.info(f"--- {measurement_type.upper()} measurement started ---")
+    logger.info(f"Sample: {sample_name}")
+    logger.info(f"Output: {output_folder}")
+    logger.info(f"Log: {log_filepath}")
     
     return logger
 
@@ -135,19 +130,12 @@ def finalize_logging(logger: logging.Logger, success: bool = True, error_msg: st
         success: Whether the measurement completed successfully
         error_msg: Error message if measurement failed
     """
-    logger.info("=" * 60)
-    logger.info("MEASUREMENT LOG ENDED")
-    logger.info("=" * 60)
-    logger.info(f"End Time: {datetime.now().strftime('%d-%m-%Y %H:%M:%S')}")
-    
     if success:
-        logger.info("Status: COMPLETED SUCCESSFULLY")
+        logger.info("--- Measurement completed successfully ---")
     else:
-        logger.error(f"Status: FAILED")
-        if error_msg:
-            logger.error(f"Error: {error_msg}")
+        logger.error(f"--- Measurement FAILED{': ' + error_msg if error_msg else ''} ---")
     
-    logger.info("=" * 60)
+    logger.info(f"End: {datetime.now().strftime('%d-%m-%Y %H:%M:%S')}")
     
     # Close and remove all handlers
     for handler in logger.handlers[:]:
@@ -267,13 +255,9 @@ def setup_global_logger(
     logger.addHandler(console_handler)
     
     # Log header
-    logger.info("=" * 60)
-    logger.info("TEMPERATURE SWEEP MEASUREMENT LOG")
-    logger.info("=" * 60)
+    logger.info(f"--- Temperature sweep started ---")
     logger.info(f"Sample: {sample_name}")
-    logger.info(f"Output Folder: {sample_folder}")
-    logger.info(f"Start Time: {datetime.now().strftime('%d-%m-%Y %H:%M:%S')}")
-    logger.info("=" * 60)
+    logger.info(f"Output: {sample_folder}")
     
     return logger
 
@@ -348,11 +332,8 @@ def setup_temperature_logger(
     logger.addHandler(file_handler)
     
     # Log header
-    logger.info("=" * 60)
-    logger.info(f"MEASUREMENT AT {temperature}°C")
-    logger.info("=" * 60)
-    logger.info(f"Start Time: {datetime.now().strftime('%d-%m-%Y %H:%M:%S')}")
-    logger.info("=" * 60)
+    logger.info(f"--- Measurement at {temperature}°C ---")
+    logger.info(f"Started: {datetime.now().strftime('%d-%m-%Y %H:%M:%S')}")
     
     return logger
 

@@ -6,6 +6,7 @@ without being connected to actual instruments.
 """
 
 import numpy as np
+import pandas as pd
 import time
 import logging
 from pathlib import Path
@@ -355,8 +356,6 @@ def _create_seebeck_plots(
 
 def _save_seebeck_data(time_data, T_hot, T_cold, delta_T, delta_V, filename, output_path):
     """Save Seebeck measurement data to CSV."""
-    import pandas as pd
-    
     df = pd.DataFrame({
         'Time_s': time_data,
         'T_hot_C': T_hot,

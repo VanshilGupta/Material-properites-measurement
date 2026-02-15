@@ -20,13 +20,16 @@ from pathlib import Path
 
 from measure_sigma import measure_sigma, save_results_to_csv
 from seebeck_measurement import SeebeckMeasurement
+from run_sigma import save_sigma_vs_temp
+from run_seebeck import save_seebeck_vs_temp
 from constants import (
     DEFAULT_SAMPLE_THICKNESS, 
     DEFAULT_SAMPLE_DIAMETER,
     EUROTHERM_COM_PORT,
     EUROTHERM_STABILITY_TOLERANCE,
     EUROTHERM_STABILITY_TIME,
-    EUROTHERM_STABILITY_TIMEOUT
+    EUROTHERM_STABILITY_TIMEOUT,
+    read_current_temperature
 )
 from output_manager import (
     create_temp_sweep_structure,
@@ -65,23 +68,11 @@ def run_single_combined(
         diameter: Sample diameter in mm
         seebeck_time: Seebeck measurement duration in seconds
     """
-    # Read current temperature from DAQ before measurement
+    # Read current temperature
     if is_simulation_mode():
         current_temp = simulate_temperature_reading()
     else:
-        try:
-            import pyvisa
-            from constants import DAQ_RESOURCE
-            rm = pyvisa.ResourceManager()
-            daq = rm.open_resource(DAQ_RESOURCE)
-            daq.write('ROUT:SCAN (@111)')
-            daq.write('SENS:FUNC "TEMP", (@111)')
-            temp_reading = float(daq.query('READ?').strip())
-            daq.close()
-            current_temp = temp_reading
-        except:
-            # If temperature read fails, default to 25°C
-            current_temp = 25.0
+        current_temp = read_current_temperature()
     
     # Create folder structure with actual temperature (for Sigma first, we'll add Seebeck subfolder)
     result = create_single_measurement_structure(sample_name, "sigma", temperature=current_temp)
@@ -459,80 +450,6 @@ def run_combined_temperature_sweep(
         if eurotherm is not None:
             eurotherm.set_temperature(25.0)
             eurotherm.disconnect()
-
-
-def save_sigma_vs_temp(sample_folder: Path, sample_name: str, results: list):
-    """Save aggregated Sigma vs Temperature data."""
-    if not results:
-        print("No sigma results to save.")
-        return
-    
-    data = {
-        'Target_Temp_C': [r.get('target_temp', np.nan) for r in results],
-        'Actual_Temp_C': [r.get('actual_temp', np.nan) for r in results],
-        'Sigma_S_cm': [r.get('corr_sigma', np.nan) for r in results],
-        'Sigma_uncorr_S_cm': [r.get('uncorr_sigma', np.nan) for r in results],
-        'Valid_Count': [r.get('valid_count', np.nan) for r in results]
-    }
-    
-    df = pd.DataFrame(data)
-    csv_path = sample_folder / f"{sample_name}_Sigma_vs_Temp.csv"
-    df.to_csv(csv_path, index=False)
-    print(f"Saved: {csv_path}")
-    
-    # Create plot
-    fig, ax = plt.subplots(figsize=(10, 6))
-    valid = ~np.isnan(data['Sigma_S_cm'])
-    if any(valid):
-        temps = np.array(data['Target_Temp_C'])[valid]
-        sigma = np.array(data['Sigma_S_cm'])[valid]
-        ax.semilogy(temps, sigma, 'o-', markersize=8, linewidth=2, color='blue')
-    ax.set_xlabel('Temperature (°C)', fontsize=12, fontweight='bold')
-    ax.set_ylabel('Electrical Conductivity (S/cm)', fontsize=12, fontweight='bold')
-    ax.set_title(f'{sample_name} - Sigma vs Temperature', fontsize=14, fontweight='bold')
-    ax.grid(True, alpha=0.3, which='both')
-    plt.tight_layout()
-    plot_path = sample_folder / f"{sample_name}_Sigma_vs_Temp.png"
-    fig.savefig(plot_path, dpi=300, bbox_inches='tight')
-    plt.close(fig)
-    print(f"Saved: {plot_path}")
-
-
-def save_seebeck_vs_temp(sample_folder: Path, sample_name: str, results: list):
-    """Save aggregated Seebeck vs Temperature data."""
-    if not results:
-        print("No seebeck results to save.")
-        return
-    
-    data = {
-        'Target_Temp_C': [r.get('target_temp', np.nan) for r in results],
-        'Actual_Temp_C': [r.get('actual_temp', np.nan) for r in results],
-        'Seebeck_uV_K': [r.get('Seebeck', np.nan) for r in results],
-        'T_avg_C': [r.get('T_avg', np.nan) for r in results],
-        'R_squared': [r.get('adj_r_square', np.nan) for r in results]
-    }
-    
-    df = pd.DataFrame(data)
-    csv_path = sample_folder / f"{sample_name}_Seebeck_vs_Temp.csv"
-    df.to_csv(csv_path, index=False)
-    print(f"Saved: {csv_path}")
-    
-    # Create plot
-    fig, ax = plt.subplots(figsize=(10, 6))
-    valid = ~np.isnan(data['Seebeck_uV_K'])
-    if any(valid):
-        temps = np.array(data['Target_Temp_C'])[valid]
-        seebeck = np.array(data['Seebeck_uV_K'])[valid]
-        ax.plot(temps, seebeck, 'o-', markersize=8, linewidth=2, color='red')
-    ax.set_xlabel('Temperature (°C)', fontsize=12, fontweight='bold')
-    ax.set_ylabel('Seebeck Coefficient (µV/K)', fontsize=12, fontweight='bold')
-    ax.set_title(f'{sample_name} - Seebeck vs Temperature', fontsize=14, fontweight='bold')
-    ax.grid(True, alpha=0.3)
-    plt.tight_layout()
-    plot_path = sample_folder / f"{sample_name}_Seebeck_vs_Temp.png"
-    fig.savefig(plot_path, dpi=300, bbox_inches='tight')
-    plt.close(fig)
-    print(f"Saved: {plot_path}")
 
 
 def print_summary(sample_name: str, sigma_results: list, seebeck_results: list):

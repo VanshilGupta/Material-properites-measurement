@@ -10,7 +10,12 @@ Modify parameters here to customize measurement behavior.
 # Import shared instrument constants from root
 import sys
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent))
+
+# Ensure root project directory is importable
+_project_root = str(Path(__file__).resolve().parent.parent)
+if _project_root not in sys.path:
+    sys.path.insert(0, _project_root)
+
 from constants import (
     DAQ_RESOURCE, 
     PS_RESOURCE, 

@@ -157,7 +157,6 @@ class EurothermController:
                 timeout=self.timeout
             )
             self._connected = True
-            print(f"[DEBUG CONNECT] Serial port opened successfully: {self.serial.is_open}")
             self._log('info', f"Connected to Eurotherm on {port_name}")
             
             # Verify connection by reading temperature

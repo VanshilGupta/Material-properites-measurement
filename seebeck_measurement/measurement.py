@@ -235,12 +235,12 @@ class SeebeckMeasurement:
                 self.phase = 2
                 self.ps.turn_off_all_channels()
         
-        # Phase 2: Wait period (60s - half_time)
+        # Phase 2: Wait period (half_time - 60s)
         elif self.phase == 2:
             if elapsed_time >= half_time:
                 self.phase = 3
         
-        # Phase 3: Turn on second heater (half_time - half_time+60s)
+        # Phase 3: Turn on second heater (half_time)
         elif self.phase == 3:
             if self.GH1_active:
                 print('Phase 3: Turning Heater 2 on')

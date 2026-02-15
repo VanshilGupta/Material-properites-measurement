@@ -22,7 +22,8 @@ from constants import (
     EUROTHERM_COM_PORT,
     EUROTHERM_STABILITY_TOLERANCE,
     EUROTHERM_STABILITY_TIME,
-    EUROTHERM_STABILITY_TIMEOUT
+    EUROTHERM_STABILITY_TIMEOUT,
+    read_current_temperature
 )
 from output_manager import (
     create_single_measurement_structure,
@@ -53,25 +54,11 @@ def run_single_sigma(sample_name: str, thickness: float, diameter: float):
         thickness: Sample thickness in mm
         diameter: Sample diameter in mm
     """
-    # Read current temperature from DAQ before measurement
+    # Read current temperature
     if is_simulation_mode():
         current_temp = simulate_temperature_reading()
     else:
-        try:
-            import pyvisa
-            from constants import DAQ_RESOURCE
-            rm = pyvisa.ResourceManager()
-            daq = rm.open_resource(DAQ_RESOURCE)
-            daq.write('ROUT:SCAN (@111)')
-            daq.write('SENS:FUNC "TEMP", (@111)')
-            daq.write('SENS:TEMP:TRAN TC')
-            daq.write('SENS:TEMP:TYPE K')
-            temp_reading = float(daq.query('READ?').strip())
-            daq.close()
-            current_temp = temp_reading
-        except:
-            # If temperature read fails, default to 25°C
-            current_temp = 25.0
+        current_temp = read_current_temperature()
     
     # Create folder structure with actual temperature
     result = create_single_measurement_structure(sample_name, "sigma", temperature=current_temp)
