@@ -1,0 +1,46 @@
+11-01-2026 17:51:54 - INFO - ============================================================
+11-01-2026 17:51:54 - INFO - INSTRUMENT HEALTH CHECK & DIAGNOSTICS
+11-01-2026 17:51:54 - INFO - Started: 11-01-2026 17:51:54
+11-01-2026 17:51:54 - INFO - ============================================================
+11-01-2026 17:51:54 - INFO - 
+DEPENDENCY CHECK
+11-01-2026 17:51:54 - INFO - pyvisa: OK - Required for DAQ and Power Supply
+11-01-2026 17:51:54 - INFO - pyserial: OK - Required for Eurotherm controller
+11-01-2026 17:51:54 - INFO - numpy: OK - v2.3.4
+11-01-2026 17:51:55 - INFO - scipy: OK - v1.16.3
+11-01-2026 17:51:55 - INFO - matplotlib: OK - v3.10.7
+11-01-2026 17:51:59 - INFO - pandas: OK - v2.3.3
+11-01-2026 17:51:59 - INFO - 
+VISA BACKEND CHECK
+11-01-2026 17:52:00 - INFO - VISA Library: OK - Visa Library at C:\WINDOWS\system32\visa32.dll
+11-01-2026 17:52:09 - INFO - Found 0 VISA resources
+11-01-2026 17:52:09 - WARNING - No VISA resources found
+11-01-2026 17:52:09 - INFO - 
+KEITHLEY DAQ6510 MULTIMETER
+11-01-2026 17:52:09 - ERROR - Connection: FAIL - VISA Error: -1073807343
+11-01-2026 17:52:09 - ERROR - DAQ6510 VISA Error -1073807343: VI_ERROR_RSRC_NFOUND (-1073807343): Insufficient location information or the requested device or resource is not present in the system.
+11-01-2026 17:52:09 - INFO - 
+KEITHLEY 2230-30-1 POWER SUPPLY
+11-01-2026 17:52:09 - ERROR - Connection: FAIL - VISA Error: -1073807343
+11-01-2026 17:52:09 - ERROR - Power Supply VISA Error -1073807343: VI_ERROR_RSRC_NFOUND (-1073807343): Insufficient location information or the requested device or resource is not present in the system.
+11-01-2026 17:52:27 - INFO - 
+EUROTHERM TEMPERATURE CONTROLLER
+11-01-2026 17:52:27 - ERROR - Serial port: FAIL - could not open port 'COM5': FileNotFoundError(2, 'The system cannot find the file specified.', None, 2)
+11-01-2026 17:52:27 - WARNING - 
+  Possible causes:
+11-01-2026 17:52:27 - WARNING -     • COM5 not available
+11-01-2026 17:52:27 - WARNING -     • Port in use by another program
+11-01-2026 17:52:27 - WARNING -     • Wrong port number (check Device Manager)
+11-01-2026 17:52:39 - INFO - 
+STRESS TEST (30 seconds)
+11-01-2026 17:52:39 - INFO - 
+SUMMARY
+11-01-2026 17:52:39 - INFO - Dependencies: OK
+11-01-2026 17:52:39 - INFO - VISA Backend: OK
+11-01-2026 17:52:39 - ERROR - DAQ6510 Multimeter: FAIL
+11-01-2026 17:52:39 - ERROR - Power Supply: FAIL
+11-01-2026 17:52:39 - ERROR - Eurotherm Controller: FAIL - (optional for temperature sweep)
+11-01-2026 17:52:39 - INFO - ============================================================
+11-01-2026 17:52:39 - INFO - Check completed: 11-01-2026 17:52:39
+11-01-2026 17:52:39 - INFO - Overall result: FAILED
+11-01-2026 17:52:39 - INFO - ============================================================

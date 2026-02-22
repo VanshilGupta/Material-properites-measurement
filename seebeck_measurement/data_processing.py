@@ -56,7 +56,7 @@ def save_to_csv(
         filename: Output filename
         data: 2D numpy array of data
         headers: List of column headers
-        folder: Output folder (optional, defaults to seebeck_data/data/ next to code)
+        folder: Output folder (the sample folder where all data goes)
     """
     from pathlib import Path
     

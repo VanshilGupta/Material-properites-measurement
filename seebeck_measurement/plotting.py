@@ -94,7 +94,7 @@ class SeebeckPlotter:
         
         Args:
             filename: Base filename (without extension)
-            output_folder: Output directory (default: seebeck_data/plots/ next to code)
+            output_folder: Output directory (the sample folder where all data goes)
         """
         
         
@@ -102,11 +102,12 @@ class SeebeckPlotter:
         time.sleep(5)
         
         if output_folder is None:
-            # Default to seebeck_data/plots/ folder next to the code files
+            # Default to seebeck_data/plots/ folder next to the code files (legacy behavior)
             code_dir = Path(__file__).parent.parent
             output_folder = code_dir / 'seebeck_data' / 'plots'
         else:
-            output_folder = Path(output_folder) / 'plots'
+            # Use the provided folder directly (sample folder)
+            output_folder = Path(output_folder)
         
         output_folder.mkdir(parents=True, exist_ok=True)
         

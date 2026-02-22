@@ -17,9 +17,30 @@ DAQ_RESOURCE = 'USB0::0x05E6::0x6510::04619482::0::INSTR'
 PS_RESOURCE = 'USB0::0x05E6::0x2230::805224014787570003::0::INSTR'
 
 # ============================================================================
-# Instrument Vendor and Product IDs
+# Eurotherm Temperature Controller Configuration
 # ============================================================================
 
+# COM port number for Eurotherm (e.g., 5 for COM5)
+EUROTHERM_COM_PORT = 5
+
+# MODBUS device address (default: 1)
+EUROTHERM_DEVICE_ADDRESS = 1
+
+# Serial communication settings
+EUROTHERM_BAUD_RATE = 9600
+EUROTHERM_TIMEOUT = 2.0  # seconds
+
+# Temperature stabilization parameters
+EUROTHERM_STABILITY_TOLERANCE = 1.0    # °C deviation allowed
+EUROTHERM_STABILITY_TIME = 60.0        # seconds to hold within tolerance
+EUROTHERM_STABILITY_TIMEOUT = 1800.0   # 30 min max wait time
+EUROTHERM_CHECK_INTERVAL = 5.0         # seconds between temperature checks
+
+# Default temperature sweep parameters
+DEFAULT_START_TEMP = 50.0    # °C
+DEFAULT_END_TEMP = 200.0     # °C
+DEFAULT_TEMP_STEP = 25.0     # °C
+DEFAULT_RAMP_RATE = 10.0     # °C/min
 
 # ============================================================================
 # Sigma (Conductivity) Measurement - Van der Pauw
@@ -57,3 +78,29 @@ DAQ_NPLC = 5
 
 # Voltage range (Volts)
 DAQ_VOLTAGE_RANGE = 1.0
+
+
+# ============================================================================
+# Shared Helpers
+# ============================================================================
+
+def read_current_temperature() -> float:
+    """
+    Read the current temperature from the DAQ thermocouple channel.
+
+    Returns:
+        Temperature in °C (defaults to 25.0 if reading fails).
+    """
+    try:
+        import pyvisa
+        rm = pyvisa.ResourceManager()
+        daq = rm.open_resource(DAQ_RESOURCE)
+        daq.write('ROUT:SCAN (@111)')
+        daq.write('SENS:FUNC "TEMP", (@111)')
+        daq.write('SENS:TEMP:TRAN TC')
+        daq.write('SENS:TEMP:TYPE K')
+        temp = float(daq.query('READ?').strip())
+        daq.close()
+        return temp
+    except Exception:
+        return 25.0
