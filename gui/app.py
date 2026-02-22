@@ -30,7 +30,16 @@ def main():
     if icon_path.exists():
         app.setWindowIcon(QIcon(str(icon_path)))
 
+    # Size to half screen BEFORE show() so Qt doesn't override it
+    screen_geo = app.primaryScreen().availableGeometry()
+    target_w = max(1000, screen_geo.width() // 2)
+    target_h = max(520, screen_geo.height() // 2)
     window = MainWindow()
+    window.resize(target_w, target_h)
+    window.move(
+        screen_geo.x() + (screen_geo.width() - target_w) // 2,
+        screen_geo.y() + (screen_geo.height() - target_h) // 2,
+    )
     window.show()
 
     sys.exit(app.exec())

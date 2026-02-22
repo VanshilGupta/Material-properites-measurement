@@ -1,6 +1,7 @@
 """Reusable GUI widget components."""
 
 from .sample_info import SampleInfoPanel
-from .temperature import TemperatureSettingsPanel
-from .measurement_settings import MeasurementSettingsPanel
+from .temperature import TemperatureProfilePanel
+from .method_config import MethodConfigPanel
 from .graph_panel import GraphPanel
+from .log_panel import LogPanel

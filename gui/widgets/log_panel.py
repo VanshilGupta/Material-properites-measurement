@@ -1,0 +1,58 @@
+"""Log Panel — timestamped messages at the bottom of the window.
+
+Resized via the vertical splitter in MainWindow.  No collapse button;
+the user resizes or hides the log by dragging the splitter.
+"""
+
+from datetime import datetime
+from PySide6.QtCore import Qt, Slot
+from PySide6.QtWidgets import (
+    QWidget, QVBoxLayout, QHBoxLayout,
+    QLabel, QPlainTextEdit,
+)
+
+
+class LogPanel(QWidget):
+    """Read-only scrollable log area."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._build_ui()
+
+    def _build_ui(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        # Header
+        header = QWidget()
+        header.setObjectName("SectionHeader")
+        header.setFixedHeight(24)
+
+        hl = QHBoxLayout(header)
+        hl.setContentsMargins(10, 0, 10, 0)
+
+        log_lbl = QLabel("LOG")
+        log_lbl.setObjectName("SectionLabel")
+        hl.addWidget(log_lbl)
+        hl.addStretch()
+
+        root.addWidget(header)
+
+        # Text area
+        self.text_area = QPlainTextEdit()
+        self.text_area.setObjectName("LogArea")
+        self.text_area.setReadOnly(True)
+        self.text_area.setMaximumBlockCount(2000)
+        root.addWidget(self.text_area, stretch=1)
+
+    # ── Public API ────────────────────────────────────────────────────────
+
+    @Slot(str)
+    def append(self, message: str):
+        """Add a timestamped line and scroll to the bottom."""
+        ts = datetime.now().strftime("%H:%M:%S")
+        self.text_area.appendPlainText(f"[{ts}]  {message}")
+
+    def clear(self):
+        self.text_area.clear()
