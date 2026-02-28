@@ -235,9 +235,10 @@ class EurothermController:
         # Expected length: 3 + (count * 2) + 2 = 5 + count*2
         response_len = 5 + count * 2
         
+        self._flush()  # Flush ONCE before the first attempt only
+        
         for attempt in range(self.MAX_READ_RETRIES):
             try:
-                self._flush()
                 self.serial.write(request)
                 
                 response = self.serial.read(response_len)
@@ -309,9 +310,10 @@ class EurothermController:
                               2)  # Read 2 registers for float
         request = append_crc16(request)
         
+        self._flush()  # Flush ONCE before the first attempt only
+        
         for attempt in range(self.MAX_READ_RETRIES):
             try:
-                self._flush()
                 self.serial.write(request)
                 
                 # Response: addr(1) + func(1) + count(1) + data(4) + crc(2) = 9 bytes
@@ -393,8 +395,9 @@ class EurothermController:
         request += float_bytes
         request = append_crc16(request)
         
+        self._flush()  # Flush ONCE before writing
+        
         try:
-            self._flush()
             self.serial.write(request)
             
             # Response: addr(1) + func(1) + reg(2) + count(2) + crc(2) = 8 bytes
@@ -444,8 +447,9 @@ class EurothermController:
                               value)
         request = append_crc16(request)
         
+        self._flush()  # Flush ONCE before writing
+        
         try:
-            self._flush()
             self.serial.write(request)
             response = self.serial.read(8)
             
