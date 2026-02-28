@@ -36,7 +36,10 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtGui import QPixmap
 
-from gui.styles import STYLESHEET, TEXT_SECONDARY, SUCCESS
+from gui.styles import (
+    STYLESHEET, TEXT_SECONDARY, SUCCESS,
+    ACCENT, DANGER, BORDER,
+)
 from gui.widgets import (
     SampleInfoPanel,
     TemperatureProfilePanel,
@@ -44,7 +47,7 @@ from gui.widgets import (
     GraphPanel,
     LogPanel,
 )
-from gui.backend import EurothermService
+from gui.backend import EurothermService, MeasurementService
 
 _GUI_DIR   = pathlib.Path(__file__).resolve().parent
 _ROOT_DIR  = _GUI_DIR.parent
@@ -89,7 +92,15 @@ class MainWindow(QMainWindow):
 
         # Backend
         self.eurotherm = EurothermService(self)
+        self.measurement_svc = MeasurementService(self)
         self._temp_read_count = 0   # throttle heartbeat log: print every 30 reads (≈30 s)
+
+        # Instrument status tracking
+        self._instrument_states: dict[str, str] = {
+            "Eurotherm": "disconnected",
+            "Power Supply": "idle",
+            "Multimeter": "idle",
+        }
 
         # Build
         self._build_top_bar()
@@ -342,7 +353,34 @@ class MainWindow(QMainWindow):
         sb = QStatusBar()
         self.setStatusBar(sb)
         self.status_label = QLabel("Ready")
-        sb.addWidget(self.status_label)
+        sb.addWidget(self.status_label, stretch=1)
+
+        # ── Instrument status indicators (right side) ─────────────────────
+        self._inst_dots: dict[str, QLabel] = {}
+        self._inst_labels: dict[str, QLabel] = {}
+
+        for name in ("Eurotherm", "Power Supply", "Multimeter"):
+            dot = QLabel()
+            dot.setProperty("class", "InstrumentDot")
+            dot.setFixedSize(8, 8)
+            dot.setStyleSheet(
+                f"min-width:8px; max-width:8px; min-height:8px; max-height:8px; "
+                f"border-radius:4px; background:{BORDER};"
+            )
+
+            lbl = QLabel(name)
+            lbl.setProperty("class", "InstrumentLabel")
+            lbl.setStyleSheet(
+                f"font-size:11px; color:{TEXT_SECONDARY}; background:transparent; padding:0;"
+            )
+
+            self._inst_dots[name] = dot
+            self._inst_labels[name] = lbl
+
+            sb.addPermanentWidget(dot)
+            sb.addPermanentWidget(lbl)
+
+        self._refresh_instrument_dot("Eurotherm", "disconnected")
 
     # ==================================================================
     # Backend wiring
@@ -369,6 +407,14 @@ class MainWindow(QMainWindow):
         # RUN button validation: re-check whenever relevant fields change
         self.sample_panel.sample_changed.connect(self._update_run_btn_state)
         self.method_panel.settings_changed.connect(self._update_run_btn_state)
+
+        # ── Measurement service wiring ────────────────────────────────────
+        self.measurement_svc.log_message.connect(self.log_panel.append)
+        self.measurement_svc.status_message.connect(
+            lambda msg: self.status_label.setText(msg)
+        )
+        self.measurement_svc.instrument_status.connect(self._on_instrument_status)
+        self.measurement_svc.measurement_finished.connect(self._on_measurement_finished)
 
         # Set initial button state and tooltip immediately
         self._update_run_btn_state()
@@ -452,9 +498,11 @@ class MainWindow(QMainWindow):
         self.log_panel.append(msg)
 
     def _on_connection_state(self, connected: bool):
-        msg = "Eurotherm connected" if connected else "Eurotherm disconnected"
+        state = "connected" if connected else "disconnected"
+        msg = f"Eurotherm {state}"
         self.status_label.setText(msg)
         self.log_panel.append(msg)
+        self._on_instrument_status("Eurotherm", state)
 
     def _show_error(self, msg: str):
         self.status_label.setText(f"Error: {msg}")
@@ -474,10 +522,10 @@ class MainWindow(QMainWindow):
         t_cfg = self.temp_panel.get_settings()
 
         meas = []
-        if m_cfg["measure_seebeck"]:
-            meas.append("Seebeck")
         if m_cfg["measure_conductivity"]:
             meas.append("\u03c3")
+        if m_cfg["measure_seebeck"]:
+            meas.append("Seebeck")
         if not meas:
             QMessageBox.warning(self, "No Measurement",
                                 "Please select at least one measurement type.")
@@ -493,10 +541,13 @@ class MainWindow(QMainWindow):
         else:
             cycle_info = "Single measurement at current temperature"
 
+        diameter  = self.sample_panel.get_diameter()
+        thickness = self.sample_panel.get_thickness()
+
         info = (
             f"Sample: {name}\n"
-            f"Diameter: {self.sample_panel.get_diameter()} mm, "
-            f"Thickness: {self.sample_panel.get_thickness()} mm\n"
+            f"Diameter: {diameter} mm, "
+            f"Thickness: {thickness} mm\n"
             f"Measure: {', '.join(meas)}\n"
             f"{cycle_info}\n"
         )
@@ -505,23 +556,37 @@ class MainWindow(QMainWindow):
         self.log_panel.append(info.replace("\n", " | "))
         self._set_running(True)
 
-        # TODO: hook into actual measurement backend
-        QMessageBox.information(
-            self, "Measurement Summary",
-            info + "\n(Run logic coming soon)",
-        )
+        # Build config dict for MeasurementService
+        config = {
+            "sample_name":      name,
+            "diameter":         diameter,
+            "thickness":        thickness,
+            "measure_sigma":    m_cfg["measure_conductivity"],
+            "measure_seebeck":  m_cfg["measure_seebeck"],
+            "seebeck_time":     480.0,
+            "simulation":       True,   # TODO: expose sim toggle in UI
+        }
+        self.measurement_svc.start(config)
 
     def _on_abort(self):
         reply = QMessageBox.question(
             self, "Abort Measurement",
-            "Are you sure you want to abort the running measurement?",
+            "Are you sure you want to abort the running measurement?\n\n"
+            "Instruments will be safely shut down.",
             QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
         )
         if reply == QMessageBox.Yes:
-            self.log_panel.append("Measurement ABORTED by user")
-            self.status_label.setText("Measurement aborted")
-            self._set_running(False)
-            # TODO: stop measurement threads
+            self.measurement_svc.request_abort()
+            self.log_panel.append("Abort requested — waiting for safe shutdown …")
+            self.status_label.setText("Aborting …")
+
+    def _on_measurement_finished(self, success: bool, summary: str):
+        """Called when the measurement worker finishes (success or abort)."""
+        self._set_running(False)
+        if success:
+            self.log_panel.append(f"\u2714  {summary}")
+        else:
+            self.log_panel.append(f"\u2716  {summary}")
 
     def _set_running(self, running: bool):
         """Toggle run/abort buttons and lock or unlock all user-editable controls."""
@@ -595,6 +660,33 @@ class MainWindow(QMainWindow):
             new[index] = total
             self.graph_splitter.setSizes(new)
 
+    # -- Instrument status indicators --------------------------------------
+
+    def _on_instrument_status(self, name: str, state: str):
+        """Update the coloured dot and tooltip for an instrument."""
+        self._instrument_states[name] = state
+        self._refresh_instrument_dot(name, state)
+
+    def _refresh_instrument_dot(self, name: str, state: str):
+        """Set dot colour based on state."""
+        colour_map = {
+            "disconnected": BORDER,       # grey
+            "connected":    SUCCESS,      # green
+            "idle":         SUCCESS,      # green
+            "active":       ACCENT,       # blue (measuring)
+        }
+        colour = colour_map.get(state, BORDER)
+        dot = self._inst_dots.get(name)
+        lbl = self._inst_labels.get(name)
+        if dot:
+            dot.setStyleSheet(
+                f"min-width:8px; max-width:8px; min-height:8px; max-height:8px; "
+                f"border-radius:4px; background:{colour};"
+            )
+            dot.setToolTip(f"{name}: {state}")
+        if lbl:
+            lbl.setToolTip(f"{name}: {state}")
+
     # -- Exit / close ------------------------------------------------------
 
     def _on_exit(self):
@@ -606,9 +698,11 @@ class MainWindow(QMainWindow):
             )
             if reply != QMessageBox.Yes:
                 return
+        self.measurement_svc.stop()
         self.eurotherm.stop()
         QApplication.instance().quit()
 
     def closeEvent(self, event):
+        self.measurement_svc.stop()
         self.eurotherm.stop()
         event.accept()

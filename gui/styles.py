@@ -399,4 +399,38 @@ QToolTip {{
     background: transparent;
     padding: 6px 0;
 }}
+
+/* ── Log Clear Button ────────────────────────────────────────────────── */
+QPushButton#LogClearButton {{
+    background-color: transparent;
+    color: {TEXT_SECONDARY};
+    border: 1px solid {BORDER};
+    border-radius: 3px;
+    padding: 1px 10px;
+    font-size: 10px;
+    font-weight: bold;
+}}
+QPushButton#LogClearButton:hover {{
+    background-color: {BORDER};
+    color: {TEXT_PRIMARY};
+}}
+
+/* ── Instrument Status Indicators (status bar) ───────────────────────── */
+#InstrumentStatusWidget {{
+    background: transparent;
+}}
+.InstrumentDot {{
+    min-width: 8px;
+    max-width: 8px;
+    min-height: 8px;
+    max-height: 8px;
+    border-radius: 4px;
+    background: transparent;
+}}
+.InstrumentLabel {{
+    font-size: 11px;
+    color: {TEXT_SECONDARY};
+    background: transparent;
+    padding: 0;
+}}
 """
