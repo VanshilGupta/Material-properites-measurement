@@ -96,6 +96,12 @@ class MainWindow(QMainWindow):
         self._build_status_bar()
         self._connect_backend()
 
+        # Connect to the Eurotherm furnace on startup.
+        # The service runs on a background thread so this never blocks
+        # the UI; if the furnace is unreachable an error_occurred signal
+        # will update the log & status bar automatically.
+        self.eurotherm.start()
+
     # ==================================================================
     # Top Bar
     # ==================================================================
