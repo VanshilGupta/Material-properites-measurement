@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
     QPushButton, QLabel, QStatusBar, QMessageBox,
     QApplication, QSplitter, QScrollArea, QToolTip,
+    QDialog, QFrame, QGridLayout,
 )
 from PySide6.QtGui import QPixmap
 
@@ -57,6 +58,153 @@ _LEFT_INITIAL_FRAC  = 0.50   # fraction of window width for left panel on startu
 _LEFT_MAX_FRAC      = 0.70   # splitter can go beyond but inputs stop growing here
 _LEFT_MIN_THRESHOLD = 200    # px — below this, auto-collapse kicks in
 _COLLAPSE_STRIP_W   = 28     # px — width of the always-visible arrow strip
+
+
+# ===========================================================================
+# Pre-flight confirmation dialog
+# ===========================================================================
+
+class _MeasurementConfirmDialog(QDialog):
+    """Structured summary dialog shown before any measurement run.
+
+    Lets the operator review sample details, selected measurements,
+    and temperature mode before committing to a run.
+    """
+
+    def __init__(self, m_cfg: dict, t_cfg: dict,
+                 sample_name: str, diameter: float, thickness: float,
+                 parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Confirm Measurement")
+        self.setModal(True)
+        self.setMinimumWidth(400)
+        self._build_ui(m_cfg, t_cfg, sample_name, diameter, thickness)
+
+    def _build_ui(self, m_cfg, t_cfg, name, dia, thk):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(28, 22, 28, 20)
+        root.setSpacing(0)
+
+        # ── Title ────────────────────────────────────────────────
+        title_lbl = QLabel("Confirm Measurement")
+        title_lbl.setStyleSheet(
+            "font-size: 16px; font-weight: bold; color: #FFFFFF; "
+            "background: transparent; padding-bottom: 2px;"
+        )
+        root.addWidget(title_lbl)
+
+        sub_lbl = QLabel("Review details before starting the run.")
+        sub_lbl.setStyleSheet(
+            f"font-size: 11px; color: {TEXT_SECONDARY}; background: transparent;"
+        )
+        root.addWidget(sub_lbl)
+        root.addSpacing(18)
+
+        # ── SAMPLE ────────────────────────────────────────────────
+        root.addWidget(self._make_section_label("SAMPLE"))
+        sample_grid = QGridLayout()
+        sample_grid.setContentsMargins(0, 6, 0, 0)
+        sample_grid.setHorizontalSpacing(20)
+        sample_grid.setVerticalSpacing(4)
+        self._add_row(sample_grid, 0, "Name",      name)
+        self._add_row(sample_grid, 1, "Diameter",  f"{dia:.2f} mm")
+        self._add_row(sample_grid, 2, "Thickness", f"{thk:.2f} mm")
+        root.addLayout(sample_grid)
+        root.addSpacing(16)
+
+        # ── MEASUREMENTS ──────────────────────────────────────────
+        root.addWidget(self._make_section_label("MEASUREMENTS"))
+        meas_col = QVBoxLayout()
+        meas_col.setContentsMargins(0, 6, 0, 0)
+        meas_col.setSpacing(4)
+        if m_cfg["measure_conductivity"]:
+            meas_col.addWidget(self._make_value_label("▸  Electrical Conductivity (σ)"))
+        if m_cfg["measure_seebeck"]:
+            meas_col.addWidget(self._make_value_label("▸  Seebeck Coefficient (S)"))
+        root.addLayout(meas_col)
+        root.addSpacing(16)
+
+        # ── MODE ─────────────────────────────────────────────────
+        root.addWidget(self._make_section_label("MODE"))
+        mode_col = QVBoxLayout()
+        mode_col.setContentsMargins(0, 6, 0, 0)
+        mode_col.setSpacing(4)
+
+        if m_cfg["cycle_mode"]:
+            direction = "Heating Only" if m_cfg["heating_only"] else "Heating + Cooling"
+            mode_col.addWidget(self._make_value_label("Temperature Cycle"))
+            cycle_grid = QGridLayout()
+            cycle_grid.setContentsMargins(0, 4, 0, 0)
+            cycle_grid.setHorizontalSpacing(20)
+            cycle_grid.setVerticalSpacing(4)
+            self._add_row(cycle_grid, 0, "Start",     f"{t_cfg['start_temp']:.0f} °C")
+            self._add_row(cycle_grid, 1, "Stop",      f"{t_cfg['stop_temp']:.0f} °C")
+            self._add_row(cycle_grid, 2, "Step",      f"{t_cfg['step']:.0f} °C")
+            self._add_row(cycle_grid, 3, "Ramp Rate", f"{t_cfg['rate']:.1f} °C/min")
+            self._add_row(cycle_grid, 4, "Direction", direction)
+            mode_col.addLayout(cycle_grid)
+        else:
+            mode_col.addWidget(
+                self._make_value_label("Single measurement at current temperature")
+            )
+
+        root.addLayout(mode_col)
+        root.addSpacing(22)
+
+        # ── Divider ────────────────────────────────────────────────
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet(f"background: {BORDER}; max-height: 1px;")
+        root.addWidget(sep)
+        root.addSpacing(14)
+
+        # ── Buttons ───────────────────────────────────────────────
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.setObjectName("ExitButton")
+        cancel_btn.setFixedWidth(90)
+        cancel_btn.clicked.connect(self.reject)
+        btn_row.addWidget(cancel_btn)
+
+        btn_row.addSpacing(10)
+
+        start_btn = QPushButton("▶  Start Run")
+        start_btn.setObjectName("RunButton")
+        start_btn.setFixedWidth(140)
+        start_btn.clicked.connect(self.accept)
+        btn_row.addWidget(start_btn)
+
+        root.addLayout(btn_row)
+
+    # ── Helpers ────────────────────────────────────────────────
+
+    @staticmethod
+    def _make_section_label(text: str) -> QLabel:
+        lbl = QLabel(text)
+        lbl.setStyleSheet(
+            "font-size: 10px; font-weight: bold; letter-spacing: 1.5px; "
+            f"color: {TEXT_SECONDARY}; background: transparent;"
+        )
+        return lbl
+
+    @staticmethod
+    def _make_value_label(text: str) -> QLabel:
+        lbl = QLabel(text)
+        lbl.setStyleSheet(
+            f"color: {ACCENT}; font-weight: bold; background: transparent;"
+        )
+        return lbl
+
+    @staticmethod
+    def _add_row(grid: QGridLayout, row: int, key: str, value: str):
+        key_lbl = QLabel(key)
+        key_lbl.setStyleSheet(f"color: {TEXT_SECONDARY}; background: transparent;")
+        val_lbl = QLabel(value)
+        val_lbl.setStyleSheet("color: #E8E8E8; font-weight: bold; background: transparent;")
+        grid.addWidget(key_lbl, row, 0)
+        grid.addWidget(val_lbl, row, 1)
 
 
 class _RunButton(QPushButton):
@@ -511,7 +659,7 @@ class MainWindow(QMainWindow):
     # -- Run / Abort ---------------------------------------------------
 
     def _on_run(self):
-        """Validate inputs and start the measurement sequence."""
+        """Validate inputs, show confirmation dialog, then start the measurement."""
         name = self.sample_panel.get_sample_name()
         if not name:
             QMessageBox.warning(self, "Missing Name",
@@ -521,50 +669,44 @@ class MainWindow(QMainWindow):
         m_cfg = self.method_panel.get_settings()
         t_cfg = self.temp_panel.get_settings()
 
-        meas = []
-        if m_cfg["measure_conductivity"]:
-            meas.append("\u03c3")
-        if m_cfg["measure_seebeck"]:
-            meas.append("Seebeck")
-        if not meas:
+        if not (m_cfg["measure_conductivity"] or m_cfg["measure_seebeck"]):
             QMessageBox.warning(self, "No Measurement",
                                 "Please select at least one measurement type.")
             return
 
-        if m_cfg["cycle_mode"]:
-            direction = ("Heating only" if m_cfg["heating_only"]
-                         else "Heating + Cooling")
-            cycle_info = (
-                f"Cycle: {t_cfg['start_temp']} \u2192 {t_cfg['stop_temp']} \u00b0C, "
-                f"step {t_cfg['step']} \u00b0C, rate {t_cfg['rate']} \u00b0C/min  |  {direction}"
-            )
-        else:
-            cycle_info = "Single measurement at current temperature"
-
         diameter  = self.sample_panel.get_diameter()
         thickness = self.sample_panel.get_thickness()
 
-        info = (
-            f"Sample: {name}\n"
-            f"Diameter: {diameter} mm, "
-            f"Thickness: {thickness} mm\n"
-            f"Measure: {', '.join(meas)}\n"
-            f"{cycle_info}\n"
+        dlg = _MeasurementConfirmDialog(
+            m_cfg, t_cfg, name, diameter, thickness, parent=self,
         )
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
 
-        self.log_panel.append(f"Starting measurement \u2014 {name}")
-        self.log_panel.append(info.replace("\n", " | "))
+        # ── Operator confirmed — build log summary and kick off the run ──
+        meas_names = []
+        if m_cfg["measure_conductivity"]:
+            meas_names.append("σ")
+        if m_cfg["measure_seebeck"]:
+            meas_names.append("Seebeck")
+
+        mode_info = (
+            f"cycle {t_cfg['start_temp']:.0f}→{t_cfg['stop_temp']:.0f} °C"
+            if m_cfg["cycle_mode"]
+            else "current temperature"
+        )
+        self.log_panel.append(
+            f"Starting — {name}  |  {', '.join(meas_names)} at {mode_info}"
+        )
         self._set_running(True)
 
-        # Build config dict for MeasurementService
         config = {
-            "sample_name":      name,
-            "diameter":         diameter,
-            "thickness":        thickness,
-            "measure_sigma":    m_cfg["measure_conductivity"],
-            "measure_seebeck":  m_cfg["measure_seebeck"],
-            "seebeck_time":     480.0,
-            "simulation":       True,   # TODO: expose sim toggle in UI
+            "sample_name":     name,
+            "diameter":        diameter,
+            "thickness":       thickness,
+            "measure_sigma":   m_cfg["measure_conductivity"],
+            "measure_seebeck": m_cfg["measure_seebeck"],
+            "seebeck_time":    480.0,
         }
         self.measurement_svc.start(config)
 

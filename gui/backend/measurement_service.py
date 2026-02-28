@@ -45,13 +45,6 @@ from output_manager import (                                # noqa: E402
 )
 from measure_sigma import measure_sigma, save_results_to_csv  # noqa: E402
 from seebeck_measurement import SeebeckMeasurement           # noqa: E402
-from simulation import (                                      # noqa: E402
-    simulate_sigma_measurement,
-    simulate_temperature_reading,
-    SimulatedSeebeckMeasurement,
-    is_simulation_mode,
-    set_simulation_mode,
-)
 from constants import read_current_temperature                # noqa: E402
 
 # Instrument name constants (avoids duplicating literals).
@@ -155,17 +148,10 @@ class _MeasurementWorker(QObject):
         sample_name = config["sample_name"]
 
         try:
-            if is_simulation_mode():
-                results = simulate_sigma_measurement(
-                    sample_t=thickness, sample_dia=diameter,
-                    temperature=current_temp, verbose=False,
-                    logger=temp_logger,
-                )
-            else:
-                results = measure_sigma(
-                    sample_t=thickness, sample_dia=diameter,
-                    verbose=True, logger=temp_logger,
-                )
+            results = measure_sigma(
+                sample_t=thickness, sample_dia=diameter,
+                verbose=True, logger=temp_logger,
+            )
 
             if results:
                 results["temperature"] = current_temp
@@ -209,11 +195,7 @@ class _MeasurementWorker(QObject):
         filename = f"{sample_name}_{int(current_temp)}C"
 
         try:
-            if is_simulation_mode():
-                measurement = SimulatedSeebeckMeasurement(enable_plotting=False)
-            else:
-                measurement = SeebeckMeasurement(enable_plotting=False)
-
+            measurement = SeebeckMeasurement(enable_plotting=False)
             results = measurement.run_measurement(
                 filename=filename,
                 measurement_time=seebeck_time,
@@ -256,15 +238,10 @@ class _MeasurementWorker(QObject):
             measure_sigma      : bool
             measure_seebeck    : bool
             seebeck_time       : float  (seconds, default 480)
-            simulation         : bool
         """
         self.reset_abort()
-        do_sigma     = config["measure_sigma"]
-        do_seebeck   = config["measure_seebeck"]
-        simulation   = config.get("simulation", False)
-
-        if simulation:
-            set_simulation_mode(True)
+        do_sigma   = config["measure_sigma"]
+        do_seebeck = config["measure_seebeck"]
 
         global_logger: Optional[logging.Logger] = None
         temp_logger:   Optional[logging.Logger] = None
@@ -273,10 +250,7 @@ class _MeasurementWorker(QObject):
             # ── Read current temperature ──────────────────────────────────
             self._log("Reading current temperature …")
             self.status_message.emit("Reading temperature …")
-            current_temp = (
-                simulate_temperature_reading() if is_simulation_mode()
-                else read_current_temperature()
-            )
+            current_temp = read_current_temperature()
             self._log(f"Current temperature: {current_temp:.1f} °C")
             self._check_abort("temperature read")
 
@@ -350,10 +324,6 @@ class _MeasurementWorker(QObject):
             self._finalize_loggers(global_logger, temp_logger, str(exc))
             self._set_instruments("idle")
             self.measurement_finished.emit(False, str(exc))
-
-        finally:
-            if simulation:
-                set_simulation_mode(False)
 
     def _finalize_loggers(self, global_logger, temp_logger, error_msg: str):
         """Close file loggers on failure / abort."""
