@@ -89,6 +89,7 @@ class MainWindow(QMainWindow):
 
         # Backend
         self.eurotherm = EurothermService(self)
+        self._temp_read_count = 0   # throttle heartbeat log: print every 30 reads (≈30 s)
 
         # Build
         self._build_top_bar()
@@ -350,6 +351,7 @@ class MainWindow(QMainWindow):
     def _connect_backend(self):
         # Live temperature readout
         self.eurotherm.temperature_read.connect(self._update_current_temp)
+        self.eurotherm.temperature_read_failed.connect(self._on_temp_read_failed)
 
         # SET T button -> backend
         self.temp_panel.set_temp_requested.connect(self._on_set_furnace)
@@ -415,10 +417,33 @@ class MainWindow(QMainWindow):
 
     def _update_current_temp(self, temp_c: float):
         self.current_temp_lbl.setText(f"{temp_c:.1f}  \u00b0C")
+        self._temp_read_count += 1
+        # Log a heartbeat every 30 successful reads (≈ every 30 s) so the
+        # operator can confirm live polling without flooding the log panel.
+        if self._temp_read_count % 30 == 1:   # also fires on the very first read
+            self.log_panel.append(
+                f"[Eurotherm] T = {temp_c:.1f} \u00b0C  \u2713"
+            )
 
-    def _on_set_furnace(self, target_c: float):
-        self.status_label.setText(f"Setting furnace to {target_c:.1f} \u00b0C \u2026")
-        self.log_panel.append(f"Setting furnace \u2192 {target_c:.1f} \u00b0C")
+    def _on_temp_read_failed(self):
+        """Called when the controller responded but returned no usable value."""
+        self.log_panel.append(
+            "[Eurotherm] \u26a0 Temperature read failed — "
+            "no valid response from controller"
+        )
+        self.status_label.setText("Eurotherm: read failed — check connection")
+
+    def _on_set_furnace(self, target_c: float, rate: float):
+        self.status_label.setText(
+            f"Setting furnace \u2192 {target_c:.1f} \u00b0C  "
+            f"@ {rate:.1f} \u00b0C/min \u2026"
+        )
+        self.log_panel.append(
+            f"Setting furnace \u2192 {target_c:.1f} \u00b0C  "
+            f"(ramp {rate:.1f} \u00b0C/min)"
+        )
+        # Send ramp rate first so the controller applies it before the setpoint.
+        self.eurotherm.set_ramp_rate(rate)
         self.eurotherm.set_temperature(target_c)
 
     def _on_setpoint_sent(self, target_c: float):

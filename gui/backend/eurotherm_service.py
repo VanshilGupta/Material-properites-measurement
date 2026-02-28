@@ -45,9 +45,12 @@ from constants import (                                    # noqa: E402
     EUROTHERM_TIMEOUT,
 )
 
-# How often the worker polls the furnace for the current temperature.
-POLL_INTERVAL_MS = 2000  # 2 seconds — fast enough for a live readout,
-#                          slow enough not to saturate a 9600-baud link.
+# How long to wait between successive temperature reads.
+# Using a single-shot pattern (reschedule *after* each read completes)
+# so reads never pile up when the serial port is slow or the furnace
+# is under load.  1 s gives a smooth live display at 9600 baud —
+# each MODBUS float read is only ~20 bytes each way (~20 ms on wire).
+POLL_INTERVAL_MS = 1000
 
 
 # =====================================================================
@@ -63,10 +66,11 @@ class _EurothermWorker(QObject):
     """
 
     # Outbound signals (forwarded to EurothermService → GUI)
-    temperature_read = Signal(float)
-    set_point_reached = Signal(float)
-    error_occurred = Signal(str)
-    connection_changed = Signal(bool)
+    temperature_read        = Signal(float)
+    temperature_read_failed = Signal()      # read succeeded protocol-wise but returned None
+    set_point_reached       = Signal(float)
+    error_occurred          = Signal(str)
+    connection_changed      = Signal(bool)
 
     def __init__(self):
         super().__init__()
@@ -76,9 +80,8 @@ class _EurothermWorker(QObject):
             baud_rate=EUROTHERM_BAUD_RATE,
             timeout=EUROTHERM_TIMEOUT,
         )
-        # Timer is created in start_polling() so it belongs to the worker
-        # thread's event loop (QTimer must be started from its own thread).
-        self._poll_timer: QTimer | None = None
+        # _polling flag controls whether single-shot reschedule continues.
+        self._polling: bool = False
 
     # -- slots invoked from the GUI thread via queued connections -----------
 
@@ -126,35 +129,49 @@ class _EurothermWorker(QObject):
         except Exception as exc:
             self.error_occurred.emit(str(exc))
 
+    @Slot(float)
+    def set_ramp_rate(self, rate: float):
+        """Set the furnace ramp rate in °C/min."""
+        try:
+            if not self._controller.is_connected():
+                self.error_occurred.emit("Eurotherm not connected")
+                return
+            self._controller.set_ramp_rate(rate)
+        except Exception as exc:
+            self.error_occurred.emit(str(exc))
+
     @Slot()
     def read_temperature(self):
-        """Read current furnace temperature and emit it."""
+        """Read current furnace temperature, emit it, then reschedule."""
         try:
             if not self._controller.is_connected():
                 return
             temp = self._controller.read_temperature()
             if temp is not None:
                 self.temperature_read.emit(temp)
+            else:
+                # Controller responded but returned no usable value
+                # (bad CRC, short frame, timeout, etc.).
+                self.temperature_read_failed.emit()
         except Exception as exc:
             self.error_occurred.emit(str(exc))
+        finally:
+            # Reschedule only after this read is fully done — prevents overlap.
+            if self._polling:
+                QTimer.singleShot(POLL_INTERVAL_MS, self.read_temperature)
 
     # -- internal helpers --------------------------------------------------
 
     def _start_polling(self):
-        """Create and start the periodic temperature poll timer."""
-        if self._poll_timer is not None:
+        """Begin the single-shot polling chain."""
+        if self._polling:
             return  # already running
-        self._poll_timer = QTimer(self)
-        self._poll_timer.setInterval(POLL_INTERVAL_MS)
-        self._poll_timer.timeout.connect(self.read_temperature)
-        self._poll_timer.start()
+        self._polling = True
+        QTimer.singleShot(POLL_INTERVAL_MS, self.read_temperature)
 
     def _stop_polling(self):
-        """Stop and discard the poll timer."""
-        if self._poll_timer is not None:
-            self._poll_timer.stop()
-            self._poll_timer.deleteLater()
-            self._poll_timer = None
+        """Signal the polling chain to stop after the current read."""
+        self._polling = False
 
 
 # =====================================================================
@@ -174,16 +191,18 @@ class EurothermService(QObject):
     """
 
     # Re-export worker signals so the GUI only talks to this object.
-    temperature_read = Signal(float)
-    set_point_reached = Signal(float)
-    error_occurred = Signal(str)
-    connection_changed = Signal(bool)
+    temperature_read        = Signal(float)
+    temperature_read_failed = Signal()
+    set_point_reached       = Signal(float)
+    error_occurred          = Signal(str)
+    connection_changed      = Signal(bool)
 
     # Private signals used to invoke worker slots across threads.
     # Qt delivers these via the worker thread's event loop (queued).
     _request_connect = Signal()
     _request_disconnect = Signal()
     _request_set_temp = Signal(float)
+    _request_set_rate = Signal(float)
     _request_read_temp = Signal()
 
     def __init__(self, parent: QObject = None):
@@ -195,6 +214,7 @@ class EurothermService(QObject):
         # Forward worker signals → our own signals (auto-queued because
         # the worker lives on a different thread).
         self._worker.temperature_read.connect(self.temperature_read)
+        self._worker.temperature_read_failed.connect(self.temperature_read_failed)
         self._worker.set_point_reached.connect(self.set_point_reached)
         self._worker.error_occurred.connect(self.error_occurred)
         self._worker.connection_changed.connect(self.connection_changed)
@@ -203,6 +223,7 @@ class EurothermService(QObject):
         self._request_connect.connect(self._worker.connect_to_furnace)
         self._request_disconnect.connect(self._worker.disconnect_from_furnace)
         self._request_set_temp.connect(self._worker.set_temperature)
+        self._request_set_rate.connect(self._worker.set_ramp_rate)
         self._request_read_temp.connect(self._worker.read_temperature)
 
     # -- public methods (safe to call from any thread) ---------------------
@@ -226,6 +247,10 @@ class EurothermService(QObject):
     def set_temperature(self, target_celsius: float):
         """Request the furnace to ramp to *target_celsius* °C."""
         self._request_set_temp.emit(target_celsius)
+
+    def set_ramp_rate(self, rate_per_min: float):
+        """Set the furnace ramp rate in °C/min before sending a setpoint."""
+        self._request_set_rate.emit(rate_per_min)
 
     def read_temperature(self):
         """Request a single temperature reading (result via signal)."""
