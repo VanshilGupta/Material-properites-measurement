@@ -97,8 +97,15 @@ class EurothermController:
     REG_RAMP_RATE = 35         # Setpoint ramp rate (°C/min)
     REG_AUTO_MANUAL = 273      # Auto/Manual mode (0=Auto, 1=Manual)
     
-    # MODBUS RTU inter-frame delay (3.5 char times at 9600 baud ≈ 3.6 ms)
-    MODBUS_INTER_FRAME_DELAY = 0.004  # seconds
+    # MODBUS RTU inter-frame delay — 50 ms provides a safe margin above the
+    # 3.5-character-time minimum (~3.6 ms at 9600 baud) and matches the
+    # effective pause in the MATLAB reference code once interpreter overhead
+    # is accounted for.
+    MODBUS_INTER_FRAME_DELAY = 0.05  # seconds
+    
+    # Retry settings for MODBUS read operations
+    MAX_READ_RETRIES = 3
+    RETRY_DELAY = 0.1  # seconds between retries
     
     def __init__(
         self,
@@ -132,7 +139,6 @@ class EurothermController:
         """Log message if logger available."""
         if self.logger:
             getattr(self.logger, level, self.logger.info)(message)
-        print(f"[EUROTHERM] {message}")
     
     # -------------------------------------------------------------------------
     # Connection Management
@@ -147,7 +153,6 @@ class EurothermController:
         """
         try:
             port_name = f"COM{self.com_port}"
-            print(f"\n[DEBUG CONNECT] Opening {port_name} | baud={self.baud_rate} | 8N1 | timeout={self.timeout}s")
             self.serial = serial.Serial(
                 port=port_name,
                 baudrate=self.baud_rate,
@@ -160,22 +165,16 @@ class EurothermController:
             self._log('info', f"Connected to Eurotherm on {port_name}")
             
             # Verify connection by reading temperature
-            print(f"[DEBUG CONNECT] Attempting to read temperature to verify connection...")
             temp = self.read_temperature()
             if temp is not None:
                 self._log('info', f"Current temperature: {temp:.1f}°C")
-                print(f"[DEBUG CONNECT] ✓ Connection verified — temp = {temp:.2f}°C")
                 return True
             else:
                 self._log('warning', "Connected but could not read temperature")
-                print(f"[DEBUG CONNECT] ✗ Port opened but read_temperature() returned None!")
-                print(f"[DEBUG CONNECT]   This means the Eurotherm did not respond or sent bad data.")
-                print(f"[DEBUG CONNECT]   Check: device address ({self.device_address}), wiring, baud rate.")
                 return True
                 
         except serial.SerialException as e:
             self._log('error', f"Failed to connect to COM{self.com_port}: {e}")
-            print(f"[DEBUG CONNECT] ✗ SerialException: {e}")
             self._connected = False
             return False
     
@@ -195,14 +194,22 @@ class EurothermController:
     # -------------------------------------------------------------------------
     
     def _flush(self):
-        """Flush serial buffers."""
+        """Flush serial input buffer before a new transaction.
+        
+        Only the *input* buffer is cleared so that stale response bytes
+        from a previous transaction do not corrupt the next read.  The
+        output buffer is intentionally left alone — purging it on Windows
+        can discard bytes that the OS has accepted but not yet
+        transmitted, causing the Eurotherm to receive a truncated frame.
+        """
         if self.serial:
             self.serial.reset_input_buffer()
-            self.serial.reset_output_buffer()
     
     def _read_registers(self, register: int, count: int = 1) -> Optional[list]:
         """
         Read holding registers using MODBUS function code 3.
+        
+        Automatically retries up to ``MAX_READ_RETRIES`` times on failure.
         
         Args:
             register: Starting register address
@@ -224,56 +231,62 @@ class EurothermController:
                               count)
         request = append_crc16(request)
         
-        print(f"[DEBUG _read_registers] register={register}, count={count}")
-        print(f"[DEBUG _read_registers] TX ({len(request)} bytes): {request.hex(' ')}")
+        # Response: [addr, func, byte_count, data..., crc_lo, crc_hi]
+        # Expected length: 3 + (count * 2) + 2 = 5 + count*2
+        response_len = 5 + count * 2
         
-        try:
-            self._flush()
-            self.serial.write(request)
-            
-            # Response: [addr, func, byte_count, data..., crc_lo, crc_hi]
-            # Expected length: 3 + (count * 2) + 2 = 5 + count*2
-            response_len = 5 + count * 2
-            response = self.serial.read(response_len)
-            
-            print(f"[DEBUG _read_registers] RX ({len(response)}/{response_len} bytes): {response.hex(' ') if response else '(empty)'}")
-            
-            if len(response) < response_len:
-                print(f"[DEBUG _read_registers] ✗ FAIL: Response too short ({len(response)} < {response_len})")
-                return None
-            
-            if not verify_crc16(response):
-                print(f"[DEBUG _read_registers] ✗ FAIL: CRC check failed")
-                return None
-            
-            # Check for Eurotherm error response (function code + 0x80)
-            if len(response) >= 2 and response[1] == (3 + 0x80):
-                error_code = response[2] if len(response) >= 3 else -1
-                print(f"[DEBUG _read_registers] ✗ FAIL: Eurotherm error response, error code={error_code}")
-                return None
-            
-            # Parse values (big-endian 16-bit integers)
-            values = []
-            for i in range(count):
-                offset = 3 + i * 2
-                value = struct.unpack('>H', response[offset:offset+2])[0]
-                values.append(value)
-            
-            print(f"[DEBUG _read_registers] ✓ OK: values={values}")
-            return values
-            
-        except Exception as e:
-            print(f"[DEBUG _read_registers] ✗ EXCEPTION: {e}")
-            self._log('debug', f"Read error: {e}")
-            return None
-        finally:
-            time.sleep(self.MODBUS_INTER_FRAME_DELAY)
+        for attempt in range(self.MAX_READ_RETRIES):
+            try:
+                self._flush()
+                self.serial.write(request)
+                
+                response = self.serial.read(response_len)
+                
+                if len(response) < response_len:
+                    self._log('warning',
+                              f"Register read incomplete: got {len(response)}/{response_len} bytes "
+                              f"(reg={register}, attempt {attempt + 1}/{self.MAX_READ_RETRIES})")
+                    time.sleep(self.RETRY_DELAY)
+                    continue
+                
+                if not verify_crc16(response):
+                    self._log('warning',
+                              f"CRC mismatch on register read "
+                              f"(reg={register}, attempt {attempt + 1}/{self.MAX_READ_RETRIES})")
+                    time.sleep(self.RETRY_DELAY)
+                    continue
+                
+                # Check for Eurotherm error response (function code + 0x80)
+                if response[1] == (3 + 0x80):
+                    error_code = response[2] if len(response) > 2 else -1
+                    self._log('warning',
+                              f"Eurotherm error response code {error_code} for register {register}")
+                    return None  # No point retrying a device-level error
+                
+                # Parse values (big-endian 16-bit integers)
+                values = []
+                for i in range(count):
+                    offset = 3 + i * 2
+                    value = struct.unpack('>H', response[offset:offset+2])[0]
+                    values.append(value)
+                
+                return values
+                
+            except Exception as e:
+                self._log('warning', f"Register read exception (attempt {attempt + 1}): {e}")
+                time.sleep(self.RETRY_DELAY)
+            finally:
+                time.sleep(self.MODBUS_INTER_FRAME_DELAY)
+        
+        self._log('warning', f"Register read failed after {self.MAX_READ_RETRIES} attempts (reg={register})")
+        return None
     
     def _read_float(self, register: int) -> Optional[float]:
         """
         Read a full-resolution floating point value.
         
         Uses the Eurotherm full-resolution addressing (register*2 + 0x8000).
+        Automatically retries up to ``MAX_READ_RETRIES`` times on failure.
         
         Args:
             register: Register address
@@ -288,8 +301,6 @@ class EurothermController:
         # Address = parameterAddress * 2 + 0x8000 (sent as-is, no subtraction)
         full_res_addr = register * 2 + 0x8000
         
-        print(f"[DEBUG _read_float] register={register}, full_res_addr=0x{full_res_addr:04X}")
-        
         # Build request for 2 registers (4 bytes = 1 float)
         request = struct.pack('>BBHH',
                               self.device_address,
@@ -298,47 +309,57 @@ class EurothermController:
                               2)  # Read 2 registers for float
         request = append_crc16(request)
         
-        print(f"[DEBUG _read_float] TX ({len(request)} bytes): {request.hex(' ')}")
+        for attempt in range(self.MAX_READ_RETRIES):
+            try:
+                self._flush()
+                self.serial.write(request)
+                
+                # Response: addr(1) + func(1) + count(1) + data(4) + crc(2) = 9 bytes
+                response = self.serial.read(9)
+                
+                if len(response) < 9:
+                    self._log('warning',
+                              f"Float read incomplete: got {len(response)}/9 bytes "
+                              f"(reg={register}, attempt {attempt + 1}/{self.MAX_READ_RETRIES})")
+                    time.sleep(self.RETRY_DELAY)
+                    continue
+                
+                if not verify_crc16(response):
+                    self._log('warning',
+                              f"CRC mismatch on float read "
+                              f"(reg={register}, attempt {attempt + 1}/{self.MAX_READ_RETRIES})")
+                    time.sleep(self.RETRY_DELAY)
+                    continue
+                
+                # Check for Eurotherm error response (function code + 0x80)
+                if response[1] == (3 + 0x80):
+                    error_code = response[2] if len(response) > 2 else -1
+                    self._log('warning',
+                              f"Eurotherm error response code {error_code} for register {register}")
+                    return None  # No point retrying a device-level error
+                
+                # Validate response header: device address and function code
+                if response[0] != self.device_address or response[1] != 3:
+                    self._log('warning',
+                              f"Unexpected response header: addr={response[0]}, func={response[1]} "
+                              f"(expected addr={self.device_address}, func=3)")
+                    time.sleep(self.RETRY_DELAY)
+                    continue
+                
+                # Extract 4 bytes and convert to float (big-endian)
+                float_bytes = response[3:7]
+                value = struct.unpack('>f', float_bytes)[0]
+                
+                return value
+                
+            except Exception as e:
+                self._log('warning', f"Float read exception (attempt {attempt + 1}): {e}")
+                time.sleep(self.RETRY_DELAY)
+            finally:
+                time.sleep(self.MODBUS_INTER_FRAME_DELAY)
         
-        try:
-            self._flush()
-            self.serial.write(request)
-            
-            # Response: addr(1) + func(1) + count(1) + data(4) + crc(2) = 9 bytes
-            response = self.serial.read(9)
-            
-            print(f"[DEBUG _read_float] RX ({len(response)}/9 bytes): {response.hex(' ') if response else '(empty)'}")
-            
-            if len(response) < 9:
-                print(f"[DEBUG _read_float] ✗ FAIL: Response too short ({len(response)} < 9) — Eurotherm did not reply or sent partial data")
-                if len(response) >= 2 and response[1] == (3 + 0x80):
-                    error_code = response[2] if len(response) >= 3 else -1
-                    print(f"[DEBUG _read_float] ✗ Eurotherm MODBUS error response! Error code={error_code} (2=invalid address, 3=invalid value)")
-                return None
-            
-            if not verify_crc16(response):
-                print(f"[DEBUG _read_float] ✗ FAIL: CRC mismatch — data corrupted in transit")
-                return None
-            
-            # Check for error response
-            if response[1] == (3 + 0x80):
-                error_code = response[2]
-                print(f"[DEBUG _read_float] ✗ FAIL: Eurotherm error code={error_code} (2=invalid address, 3=invalid value)")
-                return None
-            
-            # Extract 4 bytes and convert to float (big-endian)
-            float_bytes = response[3:7]
-            value = struct.unpack('>f', float_bytes)[0]
-            
-            print(f"[DEBUG _read_float] ✓ OK: raw bytes={float_bytes.hex(' ')}, value={value:.4f}")
-            return value
-            
-        except Exception as e:
-            print(f"[DEBUG _read_float] ✗ EXCEPTION: {e}")
-            self._log('debug', f"Read float error: {e}")
-            return None
-        finally:
-            time.sleep(self.MODBUS_INTER_FRAME_DELAY)
+        self._log('warning', f"Float read failed after {self.MAX_READ_RETRIES} attempts (reg={register})")
+        return None
     
     def _write_float(self, register: int, value: float) -> bool:
         """
@@ -358,8 +379,6 @@ class EurothermController:
         # Address = parameterAddress * 2 + 0x8000 (sent as-is, no subtraction)
         full_res_addr = register * 2 + 0x8000
         
-        print(f"[DEBUG _write_float] register={register}, full_res_addr=0x{full_res_addr:04X}, value={value}")
-        
         # Convert float to bytes (big-endian)
         float_bytes = struct.pack('>f', value)
         
@@ -374,8 +393,6 @@ class EurothermController:
         request += float_bytes
         request = append_crc16(request)
         
-        print(f"[DEBUG _write_float] TX ({len(request)} bytes): {request.hex(' ')}")
-        
         try:
             self._flush()
             self.serial.write(request)
@@ -383,22 +400,18 @@ class EurothermController:
             # Response: addr(1) + func(1) + reg(2) + count(2) + crc(2) = 8 bytes
             response = self.serial.read(8)
             
-            print(f"[DEBUG _write_float] RX ({len(response)}/8 bytes): {response.hex(' ') if response else '(empty)'}")
-            
             if len(response) < 8:
-                print(f"[DEBUG _write_float] ✗ FAIL: Response too short ({len(response)} < 8)")
-                if len(response) >= 2 and response[1] == (16 + 0x80):
-                    error_code = response[2] if len(response) >= 3 else -1
-                    print(f"[DEBUG _write_float] ✗ Eurotherm error code={error_code}")
+                self._log('warning', f"Write float incomplete response: got {len(response)}/8 bytes (reg={register})")
                 return False
             
-            crc_ok = verify_crc16(response)
-            print(f"[DEBUG _write_float] {'✓ OK' if crc_ok else '✗ FAIL'}: CRC {'valid' if crc_ok else 'INVALID'}")
-            return crc_ok
+            if not verify_crc16(response):
+                self._log('warning', f"Write float CRC mismatch (reg={register})")
+                return False
+            
+            return True
             
         except Exception as e:
-            print(f"[DEBUG _write_float] ✗ EXCEPTION: {e}")
-            self._log('debug', f"Write float error: {e}")
+            self._log('warning', f"Write float error: {e}")
             return False
         finally:
             time.sleep(self.MODBUS_INTER_FRAME_DELAY)
@@ -431,22 +444,20 @@ class EurothermController:
                               value)
         request = append_crc16(request)
         
-        print(f"[DEBUG _write_register] register={register}, value={value}")
-        print(f"[DEBUG _write_register] TX ({len(request)} bytes): {request.hex(' ')}")
-        
         try:
             self._flush()
             self.serial.write(request)
             response = self.serial.read(8)
             
-            print(f"[DEBUG _write_register] RX ({len(response)}/8 bytes): {response.hex(' ') if response else '(empty)'}")
-            
-            ok = len(response) >= 8 and verify_crc16(response)
-            print(f"[DEBUG _write_register] {'✓ OK' if ok else '✗ FAIL'}")
-            return ok
+            if len(response) < 8:
+                self._log('warning', f"Write register incomplete response: got {len(response)}/8 bytes (reg={register})")
+                return False
+            if not verify_crc16(response):
+                self._log('warning', f"Write register CRC mismatch (reg={register})")
+                return False
+            return True
         except Exception as e:
-            print(f"[DEBUG _write_register] ✗ EXCEPTION: {e}")
-            self._log('debug', f"Write register error: {e}")
+            self._log('warning', f"Write register error: {e}")
             return False
         finally:
             time.sleep(self.MODBUS_INTER_FRAME_DELAY)
@@ -581,7 +592,6 @@ class EurothermController:
                 continue
             
             deviation = abs(current_temp - target)
-            elapsed = time.time() - start_time
             
             if deviation <= tolerance:
                 if stable_start is None:
@@ -593,11 +603,8 @@ class EurothermController:
                 if stable_duration >= stable_time:
                     self._log('info', f"Temperature STABLE at {current_temp:.1f}°C for {stable_duration:.0f}s")
                     return True
-                else:
-                    print(f"  Stabilizing: {current_temp:.1f}°C ({stable_duration:.0f}/{stable_time:.0f}s)", end='\r')
             else:
                 stable_start = None
-                print(f"  Heating: {current_temp:.1f}°C → {target}°C (elapsed: {elapsed:.0f}s)", end='\r')
             
             time.sleep(check_interval)
         

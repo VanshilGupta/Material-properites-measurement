@@ -214,13 +214,16 @@ def monitor_temperature(
                 return False
 
             current_temp = controller.read_temperature()
-            setpoint = controller.read_setpoint()
             reading_count += 1
 
             if current_temp is None:
                 logger.warning("Could not read temperature — retrying…")
                 time.sleep(check_interval)
                 continue
+
+            # Only read setpoint after a successful temperature read so we
+            # don't waste ~2 s in a timeout when the bus is unresponsive.
+            setpoint = controller.read_setpoint()
 
             deviation = abs(current_temp - target)
             sp_str = f"{setpoint:.1f}" if setpoint is not None else "N/A"
