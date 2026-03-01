@@ -5,7 +5,7 @@ from typing import List
 import numpy as np
 
 from seebeck_measurement.config import DAQ_CHANNELS, HEATER_CURRENT, HEATER_VOLTAGE
-from constants import DAQ_RESOURCE, PS_RESOURCE, DAQ_TIMEOUT
+from constants import DAQ_RESOURCE, PS_RESOURCE, DAQ_TIMEOUT, REMOTE_MODE
 
 
 class InstrumentInterface(ABC):
@@ -255,3 +255,65 @@ class PowerSupplyController(InstrumentInterface):
         
         self.configure_heater(3, current=0.0, voltage=0.0)
         self.write(':OUTP:STAT ON')
+
+
+# ─── Instrument Factories ────────────────────────────────────────────────────
+#
+# Use these functions everywhere instead of directly instantiating
+# DAQController / PowerSupplyController.  When REMOTE_MODE is True in
+# constants.py, the factory transparently returns the HTTP-proxy class
+# (RemoteDAQController / RemotePowerSupplyController) from
+# remote_instruments.py — no other code needs to change.
+#
+#   from seebeck_measurement.instruments import get_daq, get_power_supply
+#   daq = get_daq()
+#   ps  = get_power_supply()
+# ─────────────────────────────────────────────────────────────────────────────
+
+def get_daq() -> DAQController:
+    """
+    Return a DAQ controller appropriate for the current mode.
+
+    - REMOTE_MODE = False → local ``DAQController`` (pyvisa, USB)
+    - REMOTE_MODE = True  → ``RemoteDAQController`` (HTTP proxy)
+    """
+    if REMOTE_MODE:
+        from remote_instruments import RemoteDAQController
+        return RemoteDAQController()
+    return DAQController()
+
+
+def get_power_supply() -> PowerSupplyController:
+    """
+    Return a Power Supply controller appropriate for the current mode.
+
+    - REMOTE_MODE = False → local ``PowerSupplyController`` (pyvisa, USB)
+    - REMOTE_MODE = True  → ``RemotePowerSupplyController`` (HTTP proxy)
+    """
+    if REMOTE_MODE:
+        from remote_instruments import RemotePowerSupplyController
+        return RemotePowerSupplyController()
+    return PowerSupplyController()
+
+
+def get_eurotherm():
+    """
+    Return an Eurotherm controller appropriate for the current mode.
+
+    - REMOTE_MODE = False → local ``EurothermController`` (serial RS-232)
+    - REMOTE_MODE = True  → ``RemoteEurothermController`` (HTTP proxy)
+    """
+    if REMOTE_MODE:
+        from remote_instruments import RemoteEurothermController
+        return RemoteEurothermController()
+    from eurotherm_control import EurothermController
+    from constants import (
+        EUROTHERM_COM_PORT, EUROTHERM_DEVICE_ADDRESS,
+        EUROTHERM_BAUD_RATE, EUROTHERM_TIMEOUT,
+    )
+    return EurothermController(
+        com_port=EUROTHERM_COM_PORT,
+        device_address=EUROTHERM_DEVICE_ADDRESS,
+        baud_rate=EUROTHERM_BAUD_RATE,
+        timeout=EUROTHERM_TIMEOUT,
+    )

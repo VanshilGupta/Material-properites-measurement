@@ -44,6 +44,7 @@ from constants import (                                    # noqa: E402
     EUROTHERM_BAUD_RATE,
     EUROTHERM_TIMEOUT,
 )
+from seebeck_measurement.instruments import get_eurotherm  # noqa: E402
 
 # How long to wait between successive temperature reads.
 # Using a single-shot pattern (reschedule *after* each read completes)
@@ -74,12 +75,9 @@ class _EurothermWorker(QObject):
 
     def __init__(self):
         super().__init__()
-        self._controller = EurothermController(
-            com_port=EUROTHERM_COM_PORT,
-            device_address=EUROTHERM_DEVICE_ADDRESS,
-            baud_rate=EUROTHERM_BAUD_RATE,
-            timeout=EUROTHERM_TIMEOUT,
-        )
+        # get_eurotherm() returns EurothermController (local) or
+        # RemoteEurothermController (remote) depending on REMOTE_MODE.
+        self._controller = get_eurotherm()
         # _polling flag controls whether single-shot reschedule continues.
         self._polling: bool = False
 

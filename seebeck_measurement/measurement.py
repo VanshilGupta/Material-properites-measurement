@@ -5,7 +5,7 @@ import numpy as np
 import time
 
 from seebeck_measurement.config import DAQ_CHANNELS, HEATER_ON_DURATION, MAX_SAMPLES, MAX_TEMP_DIFFERENCE, PLOT_UPDATE_INTERVAL
-from .instruments import DAQController, PowerSupplyController
+from .instruments import DAQController, PowerSupplyController, get_daq, get_power_supply
 from .temperature_conversion import temp_to_voltage, voltage_to_temp
 from .data_processing import average_data, save_to_csv
 from .curve_fitting import fit_v1_v2_and_calculate_seebeck
@@ -33,8 +33,8 @@ class SeebeckMeasurement:
             ps_resource: Power supply VISA resource string
             enable_plotting: Enable real-time plotting
         """
-        self.daq = DAQController(daq_resource)
-        self.ps = PowerSupplyController(ps_resource)
+        self.daq = get_daq() if daq_resource is None else DAQController(daq_resource)
+        self.ps = get_power_supply() if ps_resource is None else PowerSupplyController(ps_resource)
         self.plotter = SeebeckPlotter() if enable_plotting else None
         
         # Measurement parameters

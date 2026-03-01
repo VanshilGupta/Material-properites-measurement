@@ -11,7 +11,6 @@ Date: 2025-11-01
 """
 
 import logging
-import pyvisa
 import numpy as np
 from scipy.optimize import brentq
 import time
@@ -24,8 +23,21 @@ from constants import (
     DEFAULT_SAMPLE_THICKNESS,
     DEFAULT_SAMPLE_DIAMETER,
     KNOWN_RESISTOR,
-    VDP_TOLERANCE
+    VDP_TOLERANCE,
+    REMOTE_MODE,
 )
+
+
+def _make_resource_manager():
+    """
+    Return either a real pyvisa.ResourceManager (local) or a
+    RemoteResourceManager (remote) depending on REMOTE_MODE.
+    """
+    if REMOTE_MODE:
+        from remote_instruments import RemoteResourceManager
+        return RemoteResourceManager()
+    import pyvisa
+    return pyvisa.ResourceManager()
 
 
 def measure_sigma(sample_t=None, sample_dia=None, verbose=True, logger=None,
@@ -69,19 +81,21 @@ def measure_sigma(sample_t=None, sample_dia=None, verbose=True, logger=None,
     
     _log('info', f"Starting sigma measurement with thickness={sample_t}mm, diameter={sample_dia}mm")
     
-    # Init resource manager
+    # Init resource manager (local pyvisa or HTTP proxy for remote mode)
     try:
-        rm = pyvisa.ResourceManager()
+        rm = _make_resource_manager()
         if verbose:
-            print("✓ PyVISA ResourceManager initialized")
-            _log('info', "PyVISA ResourceManager initialized")
+            mode_label = "Remote (HTTP proxy)" if REMOTE_MODE else "PyVISA"
+            print(f"✓ ResourceManager initialized ({mode_label})")
+            _log('info', f"ResourceManager initialized ({mode_label})")
             print(f"Available resources: {rm.list_resources()}")
             _log('debug', f"Available resources: {rm.list_resources()}")
     except Exception as e:
-        print(f"✗ FATAL: Cannot initialize PyVISA ResourceManager")
+        print(f"✗ FATAL: Cannot initialize ResourceManager")
         print(f"  Error: {e}")
-        print(f"  Solution: Install NI-VISA or pyvisa-py backend")
-        _log('error', f"FATAL: Cannot initialize PyVISA ResourceManager: {e}")
+        if not REMOTE_MODE:
+            print(f"  Solution: Install NI-VISA or pyvisa-py backend")
+        _log('error', f"FATAL: Cannot initialize ResourceManager: {e}")
         return None
     
     if verbose:
