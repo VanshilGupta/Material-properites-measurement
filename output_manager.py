@@ -278,8 +278,8 @@ def create_temperature_folder(
     Returns:
         Tuple of (temp_folder_path, temp_logger)
     """
-    # Create temperature folder (e.g., "100C")
-    temp_folder_name = f"{int(temperature)}C"
+    # Create temperature folder (e.g., "100.0C" with 1 decimal)
+    temp_folder_name = f"{temperature:.1f}C"
     temp_folder = sample_folder / temp_folder_name
     temp_folder.mkdir(parents=True, exist_ok=True)
     
@@ -371,8 +371,8 @@ def create_single_measurement_structure(
     if temperature is None:
         temperature = 25.0
     
-    # Create temperature-specific folder (e.g., "28C" instead of "RoomTemp")
-    temp_folder = sample_folder / f"{int(round(temperature))}C"
+    # Create temperature-specific folder (e.g., "28.5C" with 1 decimal)
+    temp_folder = sample_folder / f"{temperature:.1f}C"
     temp_folder.mkdir(parents=True, exist_ok=True)
     
     # Create measurement subfolder

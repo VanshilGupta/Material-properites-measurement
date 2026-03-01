@@ -420,11 +420,11 @@ QPushButton#LogClearButton:hover {{
     background: transparent;
 }}
 .InstrumentDot {{
-    min-width: 8px;
-    max-width: 8px;
-    min-height: 8px;
-    max-height: 8px;
-    border-radius: 4px;
+    min-width: 12px;
+    max-width: 12px;
+    min-height: 12px;
+    max-height: 12px;
+    border-radius: 6px;
     background: transparent;
 }}
 .InstrumentLabel {{

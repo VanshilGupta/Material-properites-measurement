@@ -92,6 +92,7 @@ class _MeasurementWorker(QObject):
     instrument_status    = Signal(str, str)   # (name, state)
     sigma_completed      = Signal(dict)
     seebeck_completed    = Signal(dict)
+    seebeck_data_point   = Signal(dict)       # real-time T1, T2, V1, V2, time
     measurement_finished = Signal(bool, str)  # (success, summary)
 
     def __init__(self):
@@ -116,6 +117,15 @@ class _MeasurementWorker(QObject):
         """Raise ``MeasurementAborted`` if the abort flag is set."""
         if self.aborted:
             raise MeasurementAborted(f"Aborted during {stage}" if stage else "Aborted")
+
+    def _interruptible_sleep(self, seconds: float, stage: str = ""):
+        """Sleep in small increments, checking abort between each."""
+        remaining = seconds
+        while remaining > 0:
+            chunk = min(remaining, 0.25)
+            time.sleep(chunk)
+            remaining -= chunk
+            self._check_abort(stage)
 
     def _log(self, msg: str):
         self.log_message.emit(msg)
@@ -148,6 +158,7 @@ class _MeasurementWorker(QObject):
         sample_name = config["sample_name"]
 
         try:
+            self._log(f"Sample: {thickness} mm × {diameter} mm  |  5 VDP iterations")
             results = measure_sigma(
                 sample_t=thickness, sample_dia=diameter,
                 verbose=True, logger=temp_logger,
@@ -157,8 +168,18 @@ class _MeasurementWorker(QObject):
                 results["temperature"] = current_temp
                 save_results_to_csv(
                     results,
-                    f"{sample_name}_{int(current_temp)}C",
+                    f"{sample_name}_{current_temp:.1f}C",
                     str(sigma_folder),
+                )
+                # Log detailed results
+                self._log(f"Current measured: {results.get('current', 0):.6f} A")
+                raw = results.get('sigma_raw')
+                if raw is not None:
+                    for idx, s in enumerate(raw):
+                        self._log(f"  Iteration {idx+1}: σ = {s:.2f} S/cm")
+                self._log(
+                    f"Valid: {results.get('valid_count', '?')}/5  |  "
+                    f"Std dev: {results.get('std_dev', 0):.4f}"
                 )
                 self._log(f"σ = {results['corr_sigma']:.2e} S/cm  ✓")
                 global_logger.info(
@@ -192,10 +213,31 @@ class _MeasurementWorker(QObject):
         temp_logger.info("Starting SEEBECK measurement …")
         sample_name  = config["sample_name"]
         seebeck_time = config.get("seebeck_time", 480.0)
-        filename = f"{sample_name}_{int(current_temp)}C"
+        filename = f"{sample_name}_{current_temp:.1f}C"
 
         try:
             measurement = SeebeckMeasurement(enable_plotting=False)
+
+            # Monkey-patch the plotter update to also emit a Qt signal
+            _orig_update = None
+            if measurement.plotter is not None:
+                _orig_update = measurement.plotter.update
+
+            _worker_ref = self
+
+            class _QtPlotBridge:
+                """Intercepts Seebeck plotter calls and emits data to GUI."""
+                def update(_, t, t1, t2, v1, v2):  # noqa: N805,N803
+                    _worker_ref.seebeck_data_point.emit({
+                        "time": t, "T1": t1, "T2": t2,
+                        "V1": v1, "V2": v2,
+                    })
+                    if _orig_update:
+                        _orig_update(t, t1, t2, v1, v2)
+
+            # Replace the plotter with our bridge so data reaches the GUI
+            measurement.plotter = _QtPlotBridge()
+
             results = measurement.run_measurement(
                 filename=filename,
                 measurement_time=seebeck_time,
@@ -223,6 +265,53 @@ class _MeasurementWorker(QObject):
         finally:
             self._set_instruments("idle")
 
+    # ── sleep monkey-patch helpers ──────────────────────────────────────
+
+    def _install_abortable_sleep(self):
+        """Replace ``time.sleep`` with an abort-aware version.
+
+        Returns the original ``time.sleep`` so it can be restored later.
+        """
+        _real_sleep = time.sleep
+
+        def _abortable_sleep(seconds):
+            remaining = seconds
+            while remaining > 0:
+                chunk = min(remaining, 0.25)
+                _real_sleep(chunk)
+                remaining -= chunk
+                if self.aborted:
+                    raise MeasurementAborted("Aborted during sleep")
+
+        time.sleep = _abortable_sleep
+        return _real_sleep
+
+    # ── folder / logger bootstrap ────────────────────────────────────────
+
+    def _prepare_folders(self, config, current_temp, do_sigma, do_seebeck):
+        """Create output folders and loggers; return context tuple."""
+        mtype = "sigma" if do_sigma else "seebeck"
+        result = create_single_measurement_structure(
+            config["sample_name"], mtype, temperature=current_temp,
+        )
+        _, global_logger, temp_folder, temp_logger, _ = result
+
+        sigma_folder   = temp_folder / "Sigma"
+        seebeck_folder = temp_folder / "Seebeck"
+        if do_sigma:
+            sigma_folder.mkdir(parents=True, exist_ok=True)
+        if do_seebeck:
+            seebeck_folder.mkdir(parents=True, exist_ok=True)
+
+        self._make_logger(global_logger)
+        self._make_logger(temp_logger)
+        global_logger.info(
+            f"Starting measurement — {config['sample_name']} "
+            f"({config['thickness']} mm × {config['diameter']} mm) "
+            f"at {current_temp:.1f} °C"
+        )
+        return global_logger, temp_folder, temp_logger, sigma_folder, seebeck_folder
+
     # ── main entry point (called via signal) ─────────────────────────────
 
     @Slot(dict)
@@ -246,6 +335,8 @@ class _MeasurementWorker(QObject):
         global_logger: Optional[logging.Logger] = None
         temp_logger:   Optional[logging.Logger] = None
 
+        _real_sleep = self._install_abortable_sleep()
+
         try:
             # ── Read current temperature ──────────────────────────────────
             self._log("Reading current temperature …")
@@ -255,26 +346,9 @@ class _MeasurementWorker(QObject):
             self._check_abort("temperature read")
 
             # ── Create folder structure ───────────────────────────────────
-            mtype = "sigma" if do_sigma else "seebeck"
-            result = create_single_measurement_structure(
-                config["sample_name"], mtype, temperature=current_temp,
-            )
-            _, global_logger, temp_folder, temp_logger, _ = result
-
-            sigma_folder   = temp_folder / "Sigma"
-            seebeck_folder = temp_folder / "Seebeck"
-            if do_sigma:
-                sigma_folder.mkdir(parents=True, exist_ok=True)
-            if do_seebeck:
-                seebeck_folder.mkdir(parents=True, exist_ok=True)
-
-            self._make_logger(global_logger)
-            self._make_logger(temp_logger)
-            global_logger.info(
-                f"Starting measurement — {config['sample_name']} "
-                f"({config['thickness']} mm × {config['diameter']} mm) "
-                f"at {current_temp:.1f} °C"
-            )
+            (global_logger, temp_folder, temp_logger,
+             sigma_folder, seebeck_folder) = self._prepare_folders(
+                config, current_temp, do_sigma, do_seebeck)
 
             # ── Run measurements ─────────────────────────────────────────
             sigma_results = (
@@ -286,9 +360,7 @@ class _MeasurementWorker(QObject):
             if do_sigma and do_seebeck:
                 self._check_abort("between measurements")
                 self._log("Safety pause (2 s) …")
-                for _ in range(4):
-                    time.sleep(0.5)
-                    self._check_abort("safety pause")
+                self._interruptible_sleep(2.0, "safety pause")
 
             seebeck_results = (
                 self._run_seebeck(config, current_temp, seebeck_folder,
@@ -325,6 +397,10 @@ class _MeasurementWorker(QObject):
             self._set_instruments("idle")
             self.measurement_finished.emit(False, str(exc))
 
+        finally:
+            # Always restore the real time.sleep
+            time.sleep = _real_sleep
+
     def _finalize_loggers(self, global_logger, temp_logger, error_msg: str):
         """Close file loggers on failure / abort."""
         if temp_logger:
@@ -353,6 +429,7 @@ class MeasurementService(QObject):
     instrument_status    = Signal(str, str)
     sigma_completed      = Signal(dict)
     seebeck_completed    = Signal(dict)
+    seebeck_data_point   = Signal(dict)
     measurement_finished = Signal(bool, str)
 
     # Private signal to invoke the worker's ``run`` slot across threads.
@@ -370,6 +447,7 @@ class MeasurementService(QObject):
         self._worker.instrument_status.connect(self.instrument_status)
         self._worker.sigma_completed.connect(self.sigma_completed)
         self._worker.seebeck_completed.connect(self.seebeck_completed)
+        self._worker.seebeck_data_point.connect(self.seebeck_data_point)
         self._worker.measurement_finished.connect(self.measurement_finished)
 
         # Wire the run request.

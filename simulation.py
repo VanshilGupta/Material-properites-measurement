@@ -94,6 +94,17 @@ def simulate_sigma_measurement(
         sigma_value = thickness_cm / (resistance * area_cm2)
         sigma_raw[i] = sigma_value
         
+        # Simulate individual V1,V2,V3,V4 voltages from resistance
+        v1 = current * resistance * (1 + np.random.normal(0, 0.01))
+        v2 = current * resistance * (1 + np.random.normal(0, 0.01))
+        v3 = current * resistance * (1 + np.random.normal(0, 0.01))
+        v4 = current * resistance * (1 + np.random.normal(0, 0.01))
+        
+        if logger:
+            logger.info(f"Iteration {i+1}/5: V1={v1:.6f} V, V2={v2:.6f} V, "
+                        f"V3={v3:.6f} V, V4={v4:.6f} V")
+            logger.info(f"  R={resistance:.6f} Ω → σ={sigma_value:.2f} S/cm")
+        
         resistances.append(resistance)
         measurements.append({
             'current': current,

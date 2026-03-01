@@ -327,12 +327,16 @@ def measure_sigma(sample_t=None, sample_dia=None, verbose=True, logger=None):
         for channel, route, label in VDP_CONFIGS:
             v = _measure_vdp_voltage(rm, channel, route, label, j+1, verbose)
             voltages.append(v)
+            _log('info', f"  {label} = {v:.6f} V" if v is not None else f"  {label} = FAILED")
         
         volt1, volt2, volt3, volt4 = voltages
+        _log('info',
+             f"  Voltages: V1={volt1}, V2={volt2}, V3={volt3}, V4={volt4}")
         
         # Skip iteration if any measurement failed
         if None in voltages:
             print(f"✗ Iteration {j+1} incomplete, skipping")
+            _log('warning', f"Iteration {j+1} incomplete — skipping")
             sigma_raw[j] = 0
             continue
         
@@ -343,6 +347,10 @@ def measure_sigma(sample_t=None, sample_dia=None, verbose=True, logger=None):
             
             R1 = V1 / current  # Resistance 1
             R2 = V2 / current  # Resistance 2
+            
+            _log('info',
+                 f"  ΔV1={V1:.6f} V, ΔV2={V2:.6f} V  →  "
+                 f"R1={R1:.6f} Ω, R2={R2:.6f} Ω")
             
             if verbose:
                 print(f"  R1 = {R1:.6f} Ω, R2 = {R2:.6f} Ω")
@@ -395,8 +403,10 @@ def measure_sigma(sample_t=None, sample_dia=None, verbose=True, logger=None):
                 
             except (ValueError, RuntimeError) as solve_error:
                 print(f"    ⚠ brentq failed: {solve_error}, using initial guess")
+                _log('warning', f"  brentq solver failed: {solve_error}")
                 sigma_raw[j] = 0  # failed to find valid sigma
             
+            _log('info', f"  Iteration {j+1} result: σ = {sigma_raw[j]:.2f} S/cm")
             if verbose:
                 print(f"  ✓ σ = {sigma_raw[j]:.2f} S/cm")
                 

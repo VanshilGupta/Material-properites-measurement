@@ -65,4 +65,8 @@ class LogPanel(QWidget):
 
     def clear(self):
         """Remove all messages from the log area."""
+        # Reset maximumBlockCount around clear to work around a Qt quirk
+        # where appendPlainText stops working after clear() with a max set.
+        self.text_area.setMaximumBlockCount(0)
         self.text_area.clear()
+        self.text_area.setMaximumBlockCount(2000)

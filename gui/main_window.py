@@ -165,6 +165,7 @@ class _MeasurementConfirmDialog(QDialog):
         cancel_btn = QPushButton("Cancel")
         cancel_btn.setObjectName("ExitButton")
         cancel_btn.setFixedWidth(90)
+        cancel_btn.setCursor(Qt.PointingHandCursor)
         cancel_btn.clicked.connect(self.reject)
         btn_row.addWidget(cancel_btn)
 
@@ -173,6 +174,7 @@ class _MeasurementConfirmDialog(QDialog):
         start_btn = QPushButton("▶  Start Run")
         start_btn.setObjectName("RunButton")
         start_btn.setFixedWidth(140)
+        start_btn.setCursor(Qt.PointingHandCursor)
         start_btn.clicked.connect(self.accept)
         btn_row.addWidget(start_btn)
 
@@ -205,6 +207,94 @@ class _MeasurementConfirmDialog(QDialog):
         val_lbl.setStyleSheet("color: #E8E8E8; font-weight: bold; background: transparent;")
         grid.addWidget(key_lbl, row, 0)
         grid.addWidget(val_lbl, row, 1)
+
+
+# ===========================================================================
+# Measurement completion summary dialog
+# ===========================================================================
+
+class _MeasurementSummaryDialog(QDialog):
+    """Summary dialog shown when a measurement finishes (success or failure)."""
+
+    def __init__(self, success: bool, summary: str, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Measurement Complete" if success else "Measurement Failed")
+        self.setModal(True)
+        self.setMinimumWidth(420)
+        self._build_ui(success, summary)
+
+    def _build_ui(self, success: bool, summary: str):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(28, 22, 28, 20)
+        root.setSpacing(0)
+
+        # ── Icon & Title ─────────────────────────────────────────
+        icon = "\u2714" if success else "\u2716"
+        colour = SUCCESS if success else DANGER
+        title_text = "Measurement Complete" if success else "Measurement Failed"
+
+        title_lbl = QLabel(f"{icon}  {title_text}")
+        title_lbl.setStyleSheet(
+            f"font-size: 16px; font-weight: bold; color: {colour}; "
+            "background: transparent; padding-bottom: 2px;"
+        )
+        root.addWidget(title_lbl)
+        root.addSpacing(16)
+
+        # ── Results ──────────────────────────────────────────────
+        root.addWidget(self._make_section_label("RESULTS"))
+        results_col = QVBoxLayout()
+        results_col.setContentsMargins(0, 6, 0, 0)
+        results_col.setSpacing(6)
+
+        # Parse the summary string (e.g. "σ = 1.23e+02 S/cm │ S = -150.00 µV/K")
+        for part in summary.split("\u2502"):
+            part = part.strip()
+            if part:
+                val_lbl = QLabel(f"  {part}")
+                val_lbl.setStyleSheet(
+                    f"color: {ACCENT}; font-weight: bold; font-size: 13px; "
+                    "background: transparent;"
+                )
+                results_col.addWidget(val_lbl)
+        if not summary or summary == "No results":
+            hint = QLabel("  No measurement results were produced.")
+            hint.setStyleSheet(
+                f"color: {TEXT_SECONDARY}; background: transparent;"
+            )
+            results_col.addWidget(hint)
+
+        root.addLayout(results_col)
+        root.addSpacing(22)
+
+        # ── Divider ──────────────────────────────────────────────
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet(f"background: {BORDER}; max-height: 1px;")
+        root.addWidget(sep)
+        root.addSpacing(14)
+
+        # ── Close button ─────────────────────────────────────────
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+
+        close_btn = QPushButton("OK")
+        close_btn.setObjectName("RunButton")
+        close_btn.setFixedWidth(100)
+        close_btn.setCursor(Qt.PointingHandCursor)
+        close_btn.clicked.connect(self.accept)
+        btn_row.addWidget(close_btn)
+
+        root.addLayout(btn_row)
+
+    @staticmethod
+    def _make_section_label(text: str) -> QLabel:
+        lbl = QLabel(text)
+        lbl.setStyleSheet(
+            "font-size: 10px; font-weight: bold; letter-spacing: 1.5px; "
+            f"color: {TEXT_SECONDARY}; background: transparent;"
+        )
+        return lbl
 
 
 class _RunButton(QPushButton):
@@ -449,14 +539,16 @@ class MainWindow(QMainWindow):
         self.graph_splitter = QSplitter(Qt.Vertical)
 
         self.graph_seebeck = GraphPanel(
-            title="S vs T   (Seebeck Coefficient)",
-            x_label="Temperature", y_label="S",
-            x_unit="\u00b0C", y_unit="\u00b5V/K",
+            title="Temperature   (T\u2081 / T\u2082 vs Time)",
+            x_label="Time", y_label="Temperature",
+            x_unit="min", y_unit="\u00b0C",
+            curves=[("T\u2081", "#E06B67"), ("T\u2082", "#5B9BD5")],
         )
         self.graph_sigma = GraphPanel(
-            title="\u03c3 vs T   (Electrical Conductivity)",
-            x_label="Temperature", y_label="\u03c3",
-            x_unit="\u00b0C", y_unit="S/cm",
+            title="Voltage   (V\u2081 / V\u2082 vs Time)",
+            x_label="Time", y_label="Voltage",
+            x_unit="min", y_unit="\u00b5V",
+            curves=[("V\u2081", "#E06B67"), ("V\u2082", "#5B9BD5")],
         )
 
         self.graph_splitter.addWidget(self.graph_seebeck)
@@ -504,22 +596,33 @@ class MainWindow(QMainWindow):
         sb.addWidget(self.status_label, stretch=1)
 
         # ── Instrument status indicators (right side) ─────────────────────
+        # Each instrument gets a coloured dot (12 px) and a label with
+        # generous spacing between groups — no separator lines.
         self._inst_dots: dict[str, QLabel] = {}
         self._inst_labels: dict[str, QLabel] = {}
 
-        for name in ("Eurotherm", "Power Supply", "Multimeter"):
+        instruments = ("Eurotherm", "Power Supply", "Multimeter")
+        for i, name in enumerate(instruments):
+            # Spacer between groups (except before the first one)
+            if i > 0:
+                spacer = QLabel("")
+                spacer.setFixedWidth(20)
+                spacer.setStyleSheet("background: transparent;")
+                sb.addPermanentWidget(spacer)
+
             dot = QLabel()
             dot.setProperty("class", "InstrumentDot")
-            dot.setFixedSize(8, 8)
+            dot.setFixedSize(12, 12)
             dot.setStyleSheet(
-                f"min-width:8px; max-width:8px; min-height:8px; max-height:8px; "
-                f"border-radius:4px; background:{BORDER};"
+                f"min-width:12px; max-width:12px; min-height:12px; max-height:12px; "
+                f"border-radius:6px; background:{BORDER};"
             )
 
             lbl = QLabel(name)
             lbl.setProperty("class", "InstrumentLabel")
             lbl.setStyleSheet(
-                f"font-size:11px; color:{TEXT_SECONDARY}; background:transparent; padding:0;"
+                f"font-size:11px; color:{TEXT_SECONDARY}; background:transparent; "
+                f"padding:0; margin-left:2px;"
             )
 
             self._inst_dots[name] = dot
@@ -527,6 +630,12 @@ class MainWindow(QMainWindow):
 
             sb.addPermanentWidget(dot)
             sb.addPermanentWidget(lbl)
+
+        # Right-side padding so the last label doesn't sit against the edge
+        end_spacer = QLabel("")
+        end_spacer.setFixedWidth(10)
+        end_spacer.setStyleSheet("background: transparent;")
+        sb.addPermanentWidget(end_spacer)
 
         self._refresh_instrument_dot("Eurotherm", "disconnected")
 
@@ -563,6 +672,7 @@ class MainWindow(QMainWindow):
         )
         self.measurement_svc.instrument_status.connect(self._on_instrument_status)
         self.measurement_svc.measurement_finished.connect(self._on_measurement_finished)
+        self.measurement_svc.seebeck_data_point.connect(self._on_seebeck_data_point)
 
         # Set initial button state and tooltip immediately
         self._update_run_btn_state()
@@ -729,6 +839,9 @@ class MainWindow(QMainWindow):
             self.log_panel.append(f"\u2714  {summary}")
         else:
             self.log_panel.append(f"\u2716  {summary}")
+        # Show summary dialog to the operator
+        dlg = _MeasurementSummaryDialog(success, summary, parent=self)
+        dlg.exec()
 
     def _set_running(self, running: bool):
         """Toggle run/abort buttons and lock or unlock all user-editable controls."""
@@ -741,6 +854,26 @@ class MainWindow(QMainWindow):
         self.sample_panel.setEnabled(not running)
         self.method_panel.setEnabled(not running)
         self.temp_panel.setEnabled(not running)
+
+        # Clear graphs at the start of a new run so old data doesn't persist.
+        if running:
+            self.graph_seebeck.clear_data()
+            self.graph_sigma.clear_data()
+
+    # -- Real-time Seebeck data --------------------------------------------
+
+    def _on_seebeck_data_point(self, data: dict):
+        """Plot a new Seebeck data point on the live graphs."""
+        t_min = data["time"] / 60.0  # seconds → minutes
+        T1 = data["T1"]
+        T2 = data["T2"]
+        V1 = data["V1"] * 1e6  # V → µV
+        V2 = data["V2"] * 1e6
+
+        self.graph_seebeck.append_to("T\u2081", t_min, T1)
+        self.graph_seebeck.append_to("T\u2082", t_min, T2)
+        self.graph_sigma.append_to("V\u2081", t_min, V1)
+        self.graph_sigma.append_to("V\u2082", t_min, V2)
 
     # -- Sidebar collapse (splitter-aware) ---------------------------------
 
@@ -822,8 +955,8 @@ class MainWindow(QMainWindow):
         lbl = self._inst_labels.get(name)
         if dot:
             dot.setStyleSheet(
-                f"min-width:8px; max-width:8px; min-height:8px; max-height:8px; "
-                f"border-radius:4px; background:{colour};"
+                f"min-width:12px; max-width:12px; min-height:12px; max-height:12px; "
+                f"border-radius:6px; background:{colour};"
             )
             dot.setToolTip(f"{name}: {state}")
         if lbl:
