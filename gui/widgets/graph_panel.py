@@ -170,6 +170,8 @@ class GraphPanel(QWidget):
                                           symbolSize=5, symbolBrush=ACCENT,
                                           symbolPen="w")
 
+        self._ref_lines: list[pg.InfiniteLine] = []
+
         return self._plot
 
     # ── Public API ────────────────────────────────────────────────────────
@@ -188,11 +190,37 @@ class GraphPanel(QWidget):
         """Replace the entire dataset of the default curve."""
         self._curve.setData(np.asarray(x), np.asarray(y))
 
+    def set_data_named(self, curve_name: str, x, y):
+        """Replace the entire dataset of a named curve."""
+        curve = self._named_curves.get(curve_name)
+        if curve is not None:
+            curve.setData(np.asarray(x), np.asarray(y))
+
+    def add_horizontal_line(self, y: float, pen=None,
+                            label: str = "") -> pg.InfiniteLine:
+        """Add a horizontal reference line at *y*."""
+        if pen is None:
+            pen = pg.mkPen(color="#FFFFFF", width=1, style=Qt.DashLine)
+        line = pg.InfiniteLine(
+            pos=y, angle=0, pen=pen,
+            label=label, labelOpts={"color": "#FFFFFF"},
+        )
+        self._plot.addItem(line)
+        self._ref_lines.append(line)
+        return line
+
+    def clear_reference_lines(self):
+        """Remove all reference lines previously added."""
+        for line in self._ref_lines:
+            self._plot.removeItem(line)
+        self._ref_lines.clear()
+
     def clear_data(self):
-        """Remove all plotted points from all curves."""
+        """Remove all plotted points, reference lines, from all curves."""
         self._curve.setData([], [])
         for c in self._named_curves.values():
             c.setData([], [])
+        self.clear_reference_lines()
 
     # ── Internals ─────────────────────────────────────────────────────────
 
@@ -225,27 +253,39 @@ class GraphPanel(QWidget):
         self._vline.setVisible(True)
         self._hline.setVisible(True)
 
-        # Find the nearest data point across all visible curves
-        best_dist = float("inf")
-        best_label = ""
+        # Collect all visible curves
         curves = (list(self._named_curves.items())
                   if self._named_curves else [("value", self._curve)])
+
+        # First pass — find the nearest x across every curve
+        nearest_x = None
+        best_dist = float("inf")
+        for _name, curve in curves:
+            xd, _yd = curve.getData()
+            if xd is None or len(xd) == 0:
+                continue
+            idx = int(np.argmin(np.abs(xd - x)))
+            dist = abs(xd[idx] - x)
+            if dist < best_dist:
+                best_dist = dist
+                nearest_x = xd[idx]
+
+        if nearest_x is None:
+            self._tooltip.setVisible(False)
+            return
+
+        # Second pass — show every curve's value at *nearest_x*
+        x_unit = self._x_unit or ""
+        y_unit = self._y_unit or ""
+        lines = [f"{self._x_label}: {nearest_x:.2f} {x_unit}"]
         for name, curve in curves:
             xd, yd = curve.getData()
             if xd is None or len(xd) == 0:
                 continue
-            idx = np.argmin(np.abs(xd - x))
-            dist = abs(xd[idx] - x)
-            if dist < best_dist:
-                best_dist = dist
-                x_unit = self._x_unit or ""
-                y_unit = self._y_unit or ""
-                best_label = (f"{name}: ({xd[idx]:.2f} {x_unit}, "
-                              f"{yd[idx]:.2f} {y_unit})")
+            idx = int(np.argmin(np.abs(xd - nearest_x)))
+            display_name = name if name != "value" else self._y_label
+            lines.append(f"  {display_name}: {yd[idx]:.2f} {y_unit}")
 
-        if best_label:
-            self._tooltip.setText(best_label)
-            self._tooltip.setPos(x, y)
-            self._tooltip.setVisible(True)
-        else:
-            self._tooltip.setVisible(False)
+        self._tooltip.setText("\n".join(lines))
+        self._tooltip.setPos(x, y)
+        self._tooltip.setVisible(True)

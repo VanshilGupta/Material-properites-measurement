@@ -43,7 +43,7 @@ from output_manager import (                                # noqa: E402
     create_single_measurement_structure,
     finalize_logging,
 )
-from measure_sigma import measure_sigma, save_results_to_csv  # noqa: E402
+from measure_sigma import measure_sigma, save_results_to_csv, save_iteration_data_to_csv  # noqa: E402
 from seebeck_measurement import SeebeckMeasurement           # noqa: E402
 from constants import read_current_temperature                # noqa: E402
 
@@ -93,7 +93,10 @@ class _MeasurementWorker(QObject):
     sigma_completed      = Signal(dict)
     seebeck_completed    = Signal(dict)
     seebeck_data_point   = Signal(dict)       # real-time T1, T2, V1, V2, time
-    measurement_finished = Signal(bool, str)  # (success, summary)
+    sigma_data_point     = Signal(dict)       # real-time per-iteration sigma data
+    seebeck_fit_ready    = Signal(dict)       # V1, V2 arrays + fit params
+    phase_changed        = Signal(str)        # "sigma" | "seebeck" | "idle"
+    measurement_finished = Signal(bool, str, dict)  # (success, summary, metadata)
 
     def __init__(self):
         super().__init__()
@@ -151,22 +154,34 @@ class _MeasurementWorker(QObject):
         self._log("━━ Starting σ (conductivity) measurement ━━")
         self.status_message.emit("Measuring σ …")
         self._set_instruments("active")
+        self.phase_changed.emit("sigma")
 
         temp_logger.info("Starting SIGMA measurement …")
         thickness = config["thickness"]
         diameter  = config["diameter"]
         sample_name = config["sample_name"]
 
+        # Progress callback — emits real-time per-iteration data to the GUI
+        def _sigma_progress(iter_data: dict):
+            self.sigma_data_point.emit(iter_data)
+
         try:
             self._log(f"Sample: {thickness} mm × {diameter} mm  |  5 VDP iterations")
             results = measure_sigma(
                 sample_t=thickness, sample_dia=diameter,
                 verbose=True, logger=temp_logger,
+                progress_callback=_sigma_progress,
             )
 
             if results:
                 results["temperature"] = current_temp
                 save_results_to_csv(
+                    results,
+                    f"{sample_name}_{current_temp:.1f}C",
+                    str(sigma_folder),
+                )
+                # Save per-iteration CSV
+                save_iteration_data_to_csv(
                     results,
                     f"{sample_name}_{current_temp:.1f}C",
                     str(sigma_folder),
@@ -209,6 +224,7 @@ class _MeasurementWorker(QObject):
         self._log("━━ Starting Seebeck coefficient measurement ━━")
         self.status_message.emit("Measuring Seebeck …")
         self._set_instruments("active")
+        self.phase_changed.emit("seebeck")
 
         temp_logger.info("Starting SEEBECK measurement …")
         sample_name  = config["sample_name"]
@@ -265,6 +281,20 @@ class _MeasurementWorker(QObject):
                 f"SEEBECK completed: {results['Seebeck']:.2f} µV/K"
             )
             self.seebeck_completed.emit(results)
+
+            # Emit fit data for the V₁ vs V₂ graph in the GUI
+            data_avg = results.get("data_avg")
+            if data_avg is not None and len(data_avg) > 0:
+                import numpy as _np
+                self.seebeck_fit_ready.emit({
+                    "V1": data_avg[:, 3].tolist(),   # V1 in µV
+                    "V2": data_avg[:, 4].tolist(),   # V2 in µV
+                    "slope": results.get("slope", 0),
+                    "intercept": results.get("offset", 0),
+                    "adj_r_square": results.get("adj_r_square", 0),
+                    "seebeck": results.get("Seebeck", 0),
+                })
+
             return results
         except MeasurementAborted:
             raise
@@ -348,44 +378,54 @@ class _MeasurementWorker(QObject):
 
         _real_sleep = self._install_abortable_sleep()
 
+        # Timing bookkeeping
+        _t_run_start = time.time()
+        _sigma_elapsed = 0.0
+        _seebeck_elapsed = 0.0
+        _current_temp = 0.0
+        _data_path = ""
+
         try:
             # ── Read current temperature ──────────────────────────────────
             self._log("Reading current temperature …")
             self.status_message.emit("Reading temperature …")
             gui_temp = config.get("gui_temperature")
             daq_temp = read_current_temperature()
-            # Prefer the DAQ reading, but if it returns the 25.0 fallback
-            # and the GUI already has a live Eurotherm reading, use that.
             if abs(daq_temp - 25.0) < 0.01 and gui_temp is not None:
-                current_temp = round(gui_temp, 1)
-                self._log(f"Using Eurotherm temperature: {current_temp:.1f} °C")
+                _current_temp = round(gui_temp, 1)
+                self._log(f"Using Eurotherm temperature: {_current_temp:.1f} °C")
             else:
-                current_temp = round(daq_temp, 1)
-                self._log(f"Current temperature: {current_temp:.1f} °C")
+                _current_temp = round(daq_temp, 1)
+                self._log(f"Current temperature: {_current_temp:.1f} °C")
             self._check_abort("temperature read")
 
             # ── Create folder structure ───────────────────────────────────
             (global_logger, temp_folder, temp_logger,
              sigma_folder, seebeck_folder) = self._prepare_folders(
-                config, current_temp, do_sigma, do_seebeck)
+                config, _current_temp, do_sigma, do_seebeck)
+            _data_path = str(temp_folder)
 
             # ── Run measurements ─────────────────────────────────────────
-            sigma_results = (
-                self._run_sigma(config, current_temp, sigma_folder,
-                                temp_logger, global_logger)
-                if do_sigma else None
-            )
+            sigma_results = None
+            if do_sigma:
+                _t0 = time.time()
+                sigma_results = self._run_sigma(
+                    config, _current_temp, sigma_folder,
+                    temp_logger, global_logger)
+                _sigma_elapsed = time.time() - _t0
 
             if do_sigma and do_seebeck:
                 self._check_abort("between measurements")
                 self._log("Safety pause (2 s) …")
                 self._interruptible_sleep(2.0, "safety pause")
 
-            seebeck_results = (
-                self._run_seebeck(config, current_temp, seebeck_folder,
-                                  temp_logger, global_logger)
-                if do_seebeck else None
-            )
+            seebeck_results = None
+            if do_seebeck:
+                _t0 = time.time()
+                seebeck_results = self._run_seebeck(
+                    config, _current_temp, seebeck_folder,
+                    temp_logger, global_logger)
+                _seebeck_elapsed = time.time() - _t0
 
             # ── Summary ──────────────────────────────────────────────────
             parts = []
@@ -400,24 +440,43 @@ class _MeasurementWorker(QObject):
             self.status_message.emit(f"Complete — {summary}")
             finalize_logging(temp_logger, success=True)
             finalize_logging(global_logger, success=True)
-            self.measurement_finished.emit(True, summary)
+
+            self.phase_changed.emit("idle")
+            _total = time.time() - _t_run_start
+            metadata = {
+                "temperature": _current_temp,
+                "data_path": _data_path,
+                "sigma_elapsed": _sigma_elapsed,
+                "seebeck_elapsed": _seebeck_elapsed,
+                "total_elapsed": _total,
+            }
+            self.measurement_finished.emit(True, summary, metadata)
 
         except MeasurementAborted:
             self._log("Measurement ABORTED by user")
             self.status_message.emit("Measurement aborted")
             self._finalize_loggers(global_logger, temp_logger, "User aborted")
             self._set_instruments("idle")
-            self.measurement_finished.emit(False, "Aborted by user")
+            self.phase_changed.emit("idle")
+            self.measurement_finished.emit(False, "Aborted by user", {
+                "temperature": _current_temp,
+                "data_path": _data_path,
+                "total_elapsed": time.time() - _t_run_start,
+            })
 
         except Exception as exc:
             self._log(f"FATAL: {exc}")
             self.status_message.emit(f"Error: {exc}")
             self._finalize_loggers(global_logger, temp_logger, str(exc))
             self._set_instruments("idle")
-            self.measurement_finished.emit(False, str(exc))
+            self.phase_changed.emit("idle")
+            self.measurement_finished.emit(False, str(exc), {
+                "temperature": _current_temp,
+                "data_path": _data_path,
+                "total_elapsed": time.time() - _t_run_start,
+            })
 
         finally:
-            # Always restore the real time.sleep
             time.sleep = _real_sleep
 
     def _finalize_loggers(self, global_logger, temp_logger, error_msg: str):
@@ -449,7 +508,10 @@ class MeasurementService(QObject):
     sigma_completed      = Signal(dict)
     seebeck_completed    = Signal(dict)
     seebeck_data_point   = Signal(dict)
-    measurement_finished = Signal(bool, str)
+    sigma_data_point     = Signal(dict)
+    seebeck_fit_ready    = Signal(dict)
+    phase_changed        = Signal(str)
+    measurement_finished = Signal(bool, str, dict)
 
     # Private signal to invoke the worker's ``run`` slot across threads.
     _request_run = Signal(dict)
@@ -467,6 +529,9 @@ class MeasurementService(QObject):
         self._worker.sigma_completed.connect(self.sigma_completed)
         self._worker.seebeck_completed.connect(self.seebeck_completed)
         self._worker.seebeck_data_point.connect(self.seebeck_data_point)
+        self._worker.sigma_data_point.connect(self.sigma_data_point)
+        self._worker.seebeck_fit_ready.connect(self.seebeck_fit_ready)
+        self._worker.phase_changed.connect(self.phase_changed)
         self._worker.measurement_finished.connect(self.measurement_finished)
 
         # Wire the run request.

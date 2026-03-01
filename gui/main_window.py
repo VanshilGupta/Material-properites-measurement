@@ -28,12 +28,13 @@ Collapse behaviour
 """
 
 import pathlib
+import pyqtgraph as pg
 from PySide6.QtCore import Qt, QEvent
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
     QPushButton, QLabel, QStatusBar, QMessageBox,
     QApplication, QSplitter, QScrollArea, QToolTip,
-    QDialog, QFrame, QGridLayout,
+    QDialog, QFrame, QGridLayout, QStackedWidget,
 )
 from PySide6.QtGui import QPixmap
 
@@ -73,14 +74,15 @@ class _MeasurementConfirmDialog(QDialog):
 
     def __init__(self, m_cfg: dict, t_cfg: dict,
                  sample_name: str, diameter: float, thickness: float,
-                 parent=None):
+                 current_temp: float = None, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Confirm Measurement")
         self.setModal(True)
         self.setMinimumWidth(400)
-        self._build_ui(m_cfg, t_cfg, sample_name, diameter, thickness)
+        self._build_ui(m_cfg, t_cfg, sample_name, diameter, thickness,
+                       current_temp)
 
-    def _build_ui(self, m_cfg, t_cfg, name, dia, thk):
+    def _build_ui(self, m_cfg, t_cfg, name, dia, thk, current_temp):
         root = QVBoxLayout(self)
         root.setContentsMargins(28, 22, 28, 20)
         root.setSpacing(0)
@@ -111,6 +113,27 @@ class _MeasurementConfirmDialog(QDialog):
         self._add_row(sample_grid, 2, "Thickness", f"{thk:.2f} mm")
         root.addLayout(sample_grid)
         root.addSpacing(16)
+
+        # ── TEMPERATURE ───────────────────────────────────────────
+        if current_temp is not None:
+            root.addWidget(self._make_section_label("TEMPERATURE"))
+            temp_col = QVBoxLayout()
+            temp_col.setContentsMargins(0, 6, 0, 0)
+            temp_col.setSpacing(4)
+
+            if m_cfg["cycle_mode"]:
+                start = t_cfg["start_temp"]
+                stop  = t_cfg["stop_temp"]
+                step  = int(t_cfg["step"])
+                temps = list(range(int(start), int(stop) + 1, step)) if step > 0 else [int(start)]
+                temp_str = ", ".join(f"{t} °C" for t in temps)
+                temp_col.addWidget(self._make_value_label(f"▸  {temp_str}"))
+            else:
+                temp_col.addWidget(
+                    self._make_value_label(f"▸  {current_temp:.1f} °C  (current)")
+                )
+            root.addLayout(temp_col)
+            root.addSpacing(16)
 
         # ── MEASUREMENTS ──────────────────────────────────────────
         root.addWidget(self._make_section_label("MEASUREMENTS"))
@@ -216,14 +239,15 @@ class _MeasurementConfirmDialog(QDialog):
 class _MeasurementSummaryDialog(QDialog):
     """Summary dialog shown when a measurement finishes (success or failure)."""
 
-    def __init__(self, success: bool, summary: str, parent=None):
+    def __init__(self, success: bool, summary: str,
+                 metadata: dict = None, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Measurement Complete" if success else "Measurement Failed")
         self.setModal(True)
-        self.setMinimumWidth(420)
-        self._build_ui(success, summary)
+        self.setMinimumWidth(440)
+        self._build_ui(success, summary, metadata or {})
 
-    def _build_ui(self, success: bool, summary: str):
+    def _build_ui(self, success: bool, summary: str, meta: dict):
         root = QVBoxLayout(self)
         root.setContentsMargins(28, 22, 28, 20)
         root.setSpacing(0)
@@ -247,7 +271,6 @@ class _MeasurementSummaryDialog(QDialog):
         results_col.setContentsMargins(0, 6, 0, 0)
         results_col.setSpacing(6)
 
-        # Parse the summary string (e.g. "σ = 1.23e+02 S/cm │ S = -150.00 µV/K")
         for part in summary.split("\u2502"):
             part = part.strip()
             if part:
@@ -265,6 +288,44 @@ class _MeasurementSummaryDialog(QDialog):
             results_col.addWidget(hint)
 
         root.addLayout(results_col)
+
+        # ── Details (temperature, path, timing) ──────────────────
+        if meta:
+            root.addSpacing(14)
+            root.addWidget(self._make_section_label("DETAILS"))
+            details_grid = QGridLayout()
+            details_grid.setContentsMargins(0, 6, 0, 0)
+            details_grid.setHorizontalSpacing(20)
+            details_grid.setVerticalSpacing(4)
+            row = 0
+            if "temperature" in meta and meta["temperature"]:
+                self._add_row(details_grid, row, "Temperature",
+                              f"{meta['temperature']:.1f} \u00b0C")
+                row += 1
+            if meta.get("sigma_elapsed", 0) > 0:
+                self._add_row(details_grid, row, "\u03c3 time",
+                              f"{meta['sigma_elapsed']:.1f} s")
+                row += 1
+            if meta.get("seebeck_elapsed", 0) > 0:
+                self._add_row(details_grid, row, "Seebeck time",
+                              f"{meta['seebeck_elapsed']:.1f} s")
+                row += 1
+            if "total_elapsed" in meta:
+                self._add_row(details_grid, row, "Total time",
+                              f"{meta['total_elapsed']:.1f} s")
+                row += 1
+            if meta.get("data_path"):
+                path_lbl = QLabel(str(meta["data_path"]))
+                path_lbl.setWordWrap(True)
+                path_lbl.setStyleSheet(
+                    f"color: {TEXT_SECONDARY}; font-size: 11px; "
+                    "background: transparent;"
+                )
+                self._add_row(details_grid, row, "Data saved", "")
+                details_grid.addWidget(path_lbl, row, 1)
+                row += 1
+            root.addLayout(details_grid)
+
         root.addSpacing(22)
 
         # ── Divider ──────────────────────────────────────────────
@@ -295,6 +356,17 @@ class _MeasurementSummaryDialog(QDialog):
             f"color: {TEXT_SECONDARY}; background: transparent;"
         )
         return lbl
+
+    @staticmethod
+    def _add_row(grid: QGridLayout, row: int, key: str, value: str):
+        key_lbl = QLabel(key)
+        key_lbl.setStyleSheet(f"color: {TEXT_SECONDARY}; background: transparent;")
+        val_lbl = QLabel(value)
+        val_lbl.setStyleSheet(
+            "color: #E8E8E8; font-weight: bold; background: transparent;"
+        )
+        grid.addWidget(key_lbl, row, 0)
+        grid.addWidget(val_lbl, row, 1)
 
 
 class _RunButton(QPushButton):
@@ -536,34 +608,85 @@ class MainWindow(QMainWindow):
         right_vl.setContentsMargins(0, 0, 0, 0)
         right_vl.setSpacing(0)
 
-        self.graph_splitter = QSplitter(Qt.Vertical)
+        self.graph_stack = QStackedWidget()
 
-        self.graph_seebeck = GraphPanel(
+        # ─── Page 0: Placeholder ─────────────────────────────────────
+        placeholder = QWidget()
+        ph_vl = QVBoxLayout(placeholder)
+        ph_vl.setAlignment(Qt.AlignCenter)
+        self._placeholder_label = QLabel(
+            "Select a measurement type and\nclick START RUN to begin"
+        )
+        self._placeholder_label.setAlignment(Qt.AlignCenter)
+        self._placeholder_label.setWordWrap(True)
+        self._placeholder_label.setStyleSheet(
+            f"color: {TEXT_SECONDARY}; font-size: 14px; "
+            "background: transparent; padding: 40px;"
+        )
+        ph_vl.addWidget(self._placeholder_label)
+        self.graph_stack.addWidget(placeholder)  # index 0
+
+        # ─── Page 1: Sigma view ──────────────────────────────────────
+        sigma_view = QWidget()
+        sigma_vl = QVBoxLayout(sigma_view)
+        sigma_vl.setContentsMargins(0, 0, 0, 0)
+        sigma_vl.setSpacing(0)
+        self.graph_sigma_iter = GraphPanel(
+            title="Conductivity  (\u03c3 per Iteration)",
+            x_label="Iteration", y_label="\u03c3",
+            x_unit="", y_unit="S/cm",
+        )
+        sigma_vl.addWidget(self.graph_sigma_iter)
+        self.graph_stack.addWidget(sigma_view)  # index 1
+
+        # ─── Page 2: Seebeck view ───────────────────────────────────
+        seebeck_view = QWidget()
+        seebeck_vl = QVBoxLayout(seebeck_view)
+        seebeck_vl.setContentsMargins(0, 0, 0, 0)
+        seebeck_vl.setSpacing(0)
+
+        self.seebeck_graph_splitter = QSplitter(Qt.Vertical)
+
+        self.graph_seebeck_t = GraphPanel(
             title="Temperature   (T\u2081 / T\u2082 vs Time)",
             x_label="Time", y_label="Temperature",
             x_unit="min", y_unit="\u00b0C",
             curves=[("T\u2081", "#E06B67"), ("T\u2082", "#5B9BD5")],
         )
-        self.graph_sigma = GraphPanel(
+        self.graph_seebeck_v = GraphPanel(
             title="Voltage   (V\u2081 / V\u2082 vs Time)",
             x_label="Time", y_label="Voltage",
             x_unit="min", y_unit="\u00b5V",
-            curves=[("V\u2081", "#E06B67"), ("V\u2082", "#5B9BD5")],
+            curves=[("V\u2081", "#4EC94E"), ("V\u2082", "#F0A500")],
         )
+        # V₁ vs V₂ fit graph — created now, added to splitter at seebeck end
+        self.graph_fit = GraphPanel(
+            title="V\u2081 vs V\u2082   (Seebeck Fit)",
+            x_label="V\u2081", y_label="V\u2082",
+            x_unit="\u00b5V", y_unit="\u00b5V",
+            curves=[("Data", "#5B9BD5"), ("Fit", "#E06B67")],
+        )
+        self._fit_graph_added = False
 
-        self.graph_splitter.addWidget(self.graph_seebeck)
-        self.graph_splitter.addWidget(self.graph_sigma)
-        self.graph_splitter.setStretchFactor(0, 1)
-        self.graph_splitter.setStretchFactor(1, 1)
+        self.seebeck_graph_splitter.addWidget(self.graph_seebeck_t)
+        self.seebeck_graph_splitter.addWidget(self.graph_seebeck_v)
+        self.seebeck_graph_splitter.setStretchFactor(0, 1)
+        self.seebeck_graph_splitter.setStretchFactor(1, 1)
 
-        self.graph_seebeck.maximize_requested.connect(
+        self.graph_seebeck_t.maximize_requested.connect(
             lambda: self._toggle_graph_maximize(0)
         )
-        self.graph_sigma.maximize_requested.connect(
+        self.graph_seebeck_v.maximize_requested.connect(
             lambda: self._toggle_graph_maximize(1)
         )
+        self.graph_fit.maximize_requested.connect(
+            lambda: self._toggle_graph_maximize(2)
+        )
 
-        right_vl.addWidget(self.graph_splitter, stretch=1)
+        seebeck_vl.addWidget(self.seebeck_graph_splitter, stretch=1)
+        self.graph_stack.addWidget(seebeck_view)  # index 2
+
+        right_vl.addWidget(self.graph_stack, stretch=1)
 
         self.h_splitter.addWidget(right)
         self.h_splitter.setStretchFactor(0, 0)
@@ -676,9 +799,16 @@ class MainWindow(QMainWindow):
         self.measurement_svc.instrument_status.connect(self._on_instrument_status)
         self.measurement_svc.measurement_finished.connect(self._on_measurement_finished)
         self.measurement_svc.seebeck_data_point.connect(self._on_seebeck_data_point)
+        self.measurement_svc.sigma_data_point.connect(self._on_sigma_data_point)
+        self.measurement_svc.seebeck_fit_ready.connect(self._on_seebeck_fit_ready)
+        self.measurement_svc.phase_changed.connect(self._on_phase_changed)
+
+        # Update placeholder text when measurement checkboxes change
+        self.method_panel.settings_changed.connect(self._update_graph_placeholder)
 
         # Set initial button state and tooltip immediately
         self._update_run_btn_state()
+        self._update_graph_placeholder()
 
     # ==================================================================
     # Slot implementations
@@ -792,7 +922,9 @@ class MainWindow(QMainWindow):
         thickness = self.sample_panel.get_thickness()
 
         dlg = _MeasurementConfirmDialog(
-            m_cfg, t_cfg, name, diameter, thickness, parent=self,
+            m_cfg, t_cfg, name, diameter, thickness,
+            current_temp=getattr(self, "_last_known_temp", None),
+            parent=self,
         )
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
@@ -814,13 +946,19 @@ class MainWindow(QMainWindow):
         )
         self._set_running(True)
 
+        # Resolve seebeck experiment time (testing mode or default)
+        if m_cfg.get("testing_mode", False):
+            seebeck_time = m_cfg.get("seebeck_time_min", 8.0) * 60.0
+        else:
+            seebeck_time = 480.0  # 8 minutes default
+
         config = {
             "sample_name":     name,
             "diameter":        diameter,
             "thickness":       thickness,
             "measure_sigma":   m_cfg["measure_conductivity"],
             "measure_seebeck": m_cfg["measure_seebeck"],
-            "seebeck_time":    480.0,
+            "seebeck_time":    seebeck_time,
             "gui_temperature": getattr(self, "_last_known_temp", None),
         }
         self.measurement_svc.start(config)
@@ -837,7 +975,7 @@ class MainWindow(QMainWindow):
             self.log_panel.append("Abort requested — waiting for safe shutdown …")
             self.status_label.setText("Aborting …")
 
-    def _on_measurement_finished(self, success: bool, summary: str):
+    def _on_measurement_finished(self, success: bool, summary: str, metadata: dict):
         """Called when the measurement worker finishes (success or abort)."""
         self._set_running(False)
         if success:
@@ -845,7 +983,9 @@ class MainWindow(QMainWindow):
         else:
             self.log_panel.append(f"\u2716  {summary}")
         # Show summary dialog to the operator
-        dlg = _MeasurementSummaryDialog(success, summary, parent=self)
+        dlg = _MeasurementSummaryDialog(
+            success, summary, metadata=metadata, parent=self,
+        )
         dlg.exec()
 
     def _set_running(self, running: bool):
@@ -862,8 +1002,14 @@ class MainWindow(QMainWindow):
 
         # Clear graphs at the start of a new run so old data doesn't persist.
         if running:
-            self.graph_seebeck.clear_data()
-            self.graph_sigma.clear_data()
+            self.graph_sigma_iter.clear_data()
+            self.graph_seebeck_t.clear_data()
+            self.graph_seebeck_v.clear_data()
+            self.graph_fit.clear_data()
+            # Remove fit graph from splitter if it was added previously
+            if self._fit_graph_added:
+                self.graph_fit.setParent(None)
+                self._fit_graph_added = False
 
     # -- Real-time Seebeck data --------------------------------------------
 
@@ -875,10 +1021,86 @@ class MainWindow(QMainWindow):
         V1 = data["V1"] * 1e6  # V → µV
         V2 = data["V2"] * 1e6
 
-        self.graph_seebeck.append_to("T\u2081", t_min, T1)
-        self.graph_seebeck.append_to("T\u2082", t_min, T2)
-        self.graph_sigma.append_to("V\u2081", t_min, V1)
-        self.graph_sigma.append_to("V\u2082", t_min, V2)
+        self.graph_seebeck_t.append_to("T\u2081", t_min, T1)
+        self.graph_seebeck_t.append_to("T\u2082", t_min, T2)
+        self.graph_seebeck_v.append_to("V\u2081", t_min, V1)
+        self.graph_seebeck_v.append_to("V\u2082", t_min, V2)
+
+    # -- Real-time Sigma data -----------------------------------------------
+
+    def _on_sigma_data_point(self, data: dict):
+        """Plot a new sigma data point on the conductivity graph."""
+        iteration = data.get("iteration", 0)
+        sigma = data.get("sigma", None)
+        if sigma is not None and sigma > 0:
+            self.graph_sigma_iter.append_to("\u03c3", iteration, sigma)
+            # After all 5 VDP iterations, add median reference line
+            if iteration == 5:
+                median_sigma = data.get("sigma", sigma)
+                self.graph_sigma_iter.add_horizontal_line(
+                    median_sigma,
+                    pen=pg.mkPen("#F0A500", width=1, style=Qt.DashLine),
+                    label=f"median \u03c3 = {median_sigma:.4f} S/cm",
+                )
+
+    def _on_seebeck_fit_ready(self, data: dict):
+        """Add the V₁ vs V₂ fit graph to the seebeck splitter."""
+        import numpy as np
+        v1 = np.array(data["V1"])  # already µV
+        v2 = np.array(data["V2"])
+        slope = data["slope"]
+        intercept = data["intercept"]
+        adj_r2 = data.get("adj_r_square", 0)
+        seebeck = data.get("seebeck", 0)
+
+        # Plot raw data and fit line
+        self.graph_fit.set_data_named("Data", v1, v2)
+        v1_sorted = np.sort(v1)
+        fit_y = slope * v1_sorted + intercept
+        self.graph_fit.set_data_named("Fit", v1_sorted, fit_y)
+
+        # Add annotation with fit results
+        self.graph_fit.add_horizontal_line(
+            0,  # invisible, just for the label
+            pen=pg.mkPen(None),
+            label=(
+                f"S = {seebeck:.3f} \u00b5V/K  |  "
+                f"adj R\u00b2 = {adj_r2:.5f}"
+            ),
+        )
+
+        # Add to seebeck splitter if not already there
+        if not self._fit_graph_added:
+            self.seebeck_graph_splitter.addWidget(self.graph_fit)
+            self._fit_graph_added = True
+            # Re-balance the splitter evenly across all graphs
+            count = self.seebeck_graph_splitter.count()
+            total = sum(self.seebeck_graph_splitter.sizes())
+            each = total // count
+            self.seebeck_graph_splitter.setSizes([each] * count)
+
+    def _on_phase_changed(self, phase: str):
+        """Switch the right panel graph stack based on the current phase."""
+        if phase == "sigma":
+            self.graph_stack.setCurrentIndex(1)
+        elif phase == "seebeck":
+            self.graph_stack.setCurrentIndex(2)
+        # 'idle' keeps the current view so results remain visible
+
+    def _update_graph_placeholder(self, *_):
+        """Update placeholder text based on measurement selection."""
+        m = self.method_panel.get_settings()
+        sigma = m.get("measure_conductivity", False)
+        seebeck = m.get("measure_seebeck", False)
+        if sigma and seebeck:
+            txt = "\u03c3 + Seebeck selected\nClick START RUN to begin"
+        elif sigma:
+            txt = "\u03c3 measurement selected\nClick START RUN to begin"
+        elif seebeck:
+            txt = "Seebeck measurement selected\nClick START RUN to begin"
+        else:
+            txt = "Select a measurement type and\nclick START RUN to begin"
+        self._placeholder_label.setText(txt)
 
     # -- Sidebar collapse (splitter-aware) ---------------------------------
 
@@ -950,16 +1172,23 @@ class MainWindow(QMainWindow):
     # -- Graph maximize / restore ------------------------------------------
 
     def _toggle_graph_maximize(self, index: int):
-        sizes = self.graph_splitter.sizes()
+        splitter = self.seebeck_graph_splitter
+        sizes = splitter.sizes()
         total = sum(sizes)
-        other = 1 - index
-        if sizes[other] < 30:
-            half = total // 2
-            self.graph_splitter.setSizes([half, total - half])
+        count = len(sizes)
+        # Check if all *other* panels are collapsed
+        others_collapsed = all(
+            s < 30 for i, s in enumerate(sizes) if i != index
+        )
+        if others_collapsed:
+            # Restore even split
+            each = total // count
+            splitter.setSizes([each] * count)
         else:
-            new = [0, 0]
-            new[index] = total
-            self.graph_splitter.setSizes(new)
+            # Maximize requested panel, collapse all others
+            new_sizes = [0] * count
+            new_sizes[index] = total
+            splitter.setSizes(new_sizes)
 
     # -- Instrument status indicators --------------------------------------
 

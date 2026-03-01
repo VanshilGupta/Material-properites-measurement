@@ -4,7 +4,7 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QGroupBox, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QPushButton, QRadioButton,
-    QCheckBox, QButtonGroup, QWidget,
+    QCheckBox, QButtonGroup, QWidget, QDoubleSpinBox, QFrame,
 )
 
 
@@ -133,6 +133,41 @@ class MethodConfigPanel(QGroupBox):
 
         vbox.addLayout(align_grid)
 
+        # ── Testing Mode ─────────────────────────────────────────────────
+        test_sep = QFrame()
+        test_sep.setFrameShape(QFrame.Shape.HLine)
+        test_sep.setStyleSheet("background: #404040; max-height: 1px;")
+        vbox.addWidget(test_sep)
+
+        self.chk_testing = QCheckBox("Testing Mode")
+        self.chk_testing.setCursor(Qt.PointingHandCursor)
+        self.chk_testing.setToolTip(
+            "Enable testing mode to adjust measurement parameters"
+        )
+        self.chk_testing.stateChanged.connect(self._on_testing_toggled)
+        self.chk_testing.stateChanged.connect(self.settings_changed)
+        vbox.addWidget(self.chk_testing)
+
+        # Seebeck time row (visible only when testing mode is ON)
+        self._test_time_row = QWidget()
+        test_hl = QHBoxLayout(self._test_time_row)
+        test_hl.setContentsMargins(0, 0, 0, 0)
+        test_hl.setSpacing(6)
+        test_time_lbl = QLabel("Seebeck time:")
+        test_time_lbl.setStyleSheet("background: transparent;")
+        self.seebeck_time_spin = QDoubleSpinBox()
+        self.seebeck_time_spin.setRange(1.0, 60.0)
+        self.seebeck_time_spin.setValue(8.0)
+        self.seebeck_time_spin.setSuffix(" min")
+        self.seebeck_time_spin.setDecimals(1)
+        self.seebeck_time_spin.setSingleStep(1.0)
+        self.seebeck_time_spin.setFixedWidth(100)
+        test_hl.addWidget(test_time_lbl)
+        test_hl.addWidget(self.seebeck_time_spin)
+        test_hl.addStretch()
+        self._test_time_row.setVisible(False)
+        vbox.addWidget(self._test_time_row)
+
         # Initial state: cycle radios disabled, none checked
         self._set_cycle_widgets_enabled(False)
 
@@ -171,6 +206,10 @@ class MethodConfigPanel(QGroupBox):
         if not enabled:
             self._uncheck_all_radios()
 
+    def _on_testing_toggled(self, state):
+        """Show or hide testing-mode parameters."""
+        self._test_time_row.setVisible(bool(state))
+
     # ── Public API ────────────────────────────────────────────────────────
 
     def is_cycle_mode(self) -> bool:
@@ -186,4 +225,6 @@ class MethodConfigPanel(QGroupBox):
             "heating_only":         self.is_heating_only(),
             "measure_seebeck":      self.chk_seebeck.isChecked(),
             "measure_conductivity": self.chk_conductivity.isChecked(),
+            "testing_mode":         self.chk_testing.isChecked(),
+            "seebeck_time_min":     self.seebeck_time_spin.value(),
         }
