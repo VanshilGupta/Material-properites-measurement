@@ -123,8 +123,6 @@ def fit_v1_v2_and_calculate_seebeck(
             fig.savefig(filepath, dpi=300, bbox_inches='tight')
             print(f"💾 Fit plot saved: {filepath}")
         
-        plt.show()
-        plt.pause(5)
         plt.close(fig)
     
     return slope, adj_r_square, intercept, rmse, S_sample
