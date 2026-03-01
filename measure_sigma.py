@@ -28,7 +28,8 @@ from constants import (
 )
 
 
-def measure_sigma(sample_t=None, sample_dia=None, verbose=True, logger=None):
+def measure_sigma(sample_t=None, sample_dia=None, verbose=True, logger=None,
+                  progress_callback=None):
     """
     Measure electrical conductivity using Van der Pauw method.
     
@@ -42,6 +43,9 @@ def measure_sigma(sample_t=None, sample_dia=None, verbose=True, logger=None):
         Print detailed debug info (default: True)
     logger : logging.Logger, optional
         Logger instance for recording measurement events
+    progress_callback : callable, optional
+        Called after each VDP iteration with a dict of iteration data.
+        Signature: ``progress_callback(iter_data: dict)``
     
     Returns:
     --------
@@ -55,6 +59,7 @@ def measure_sigma(sample_t=None, sample_dia=None, verbose=True, logger=None):
             log_method(message)
     
     sigma_raw = np.zeros(5)  # Store 5 measurements
+    iteration_results = []    # per-iteration V1–V4 + sigma
     
     # Use defaults from constants if not provided
     if sample_t is None:
@@ -338,6 +343,15 @@ def measure_sigma(sample_t=None, sample_dia=None, verbose=True, logger=None):
             print(f"✗ Iteration {j+1} incomplete, skipping")
             _log('warning', f"Iteration {j+1} incomplete — skipping")
             sigma_raw[j] = 0
+            iter_data = {
+                'iteration': j + 1,
+                'v1': volt1, 'v2': volt2, 'v3': volt3, 'v4': volt4,
+                'delta_v1': None, 'delta_v2': None,
+                'R1': None, 'R2': None, 'sigma': 0,
+            }
+            iteration_results.append(iter_data)
+            if progress_callback:
+                progress_callback(iter_data)
             continue
         
         # --- Calculate resistivity using Van der Pauw ---
@@ -409,12 +423,32 @@ def measure_sigma(sample_t=None, sample_dia=None, verbose=True, logger=None):
             _log('info', f"  Iteration {j+1} result: σ = {sigma_raw[j]:.2f} S/cm")
             if verbose:
                 print(f"  ✓ σ = {sigma_raw[j]:.2f} S/cm")
+
+            # Collect iteration-level data
+            iter_data = {
+                'iteration': j + 1,
+                'v1': volt1, 'v2': volt2, 'v3': volt3, 'v4': volt4,
+                'delta_v1': V1, 'delta_v2': V2,
+                'R1': R1, 'R2': R2, 'sigma': sigma_raw[j],
+            }
+            iteration_results.append(iter_data)
+            if progress_callback:
+                progress_callback(iter_data)
                 
         except Exception as e:
             print(f"✗ ERROR calculating resistivity (iteration {j+1})")
             print(f"  {type(e).__name__}: {e}")
             traceback.print_exc()
             sigma_raw[j] = 0
+            iter_data = {
+                'iteration': j + 1,
+                'v1': volt1, 'v2': volt2, 'v3': volt3, 'v4': volt4,
+                'delta_v1': None, 'delta_v2': None,
+                'R1': None, 'R2': None, 'sigma': 0,
+            }
+            iteration_results.append(iter_data)
+            if progress_callback:
+                progress_callback(iter_data)
             continue
     
     # =========================================================================
@@ -467,7 +501,8 @@ def measure_sigma(sample_t=None, sample_dia=None, verbose=True, logger=None):
         'current': current,
         'sample_thickness': sample_t,
         'sample_diameter': sample_dia,
-        'valid_count': len(valid_sigma)
+        'valid_count': len(valid_sigma),
+        'iterations': iteration_results,
     }
     
     return results
@@ -537,6 +572,55 @@ def save_results_to_csv(results, sample_name, output_folder=None):
         
     except Exception as e:
         print(f"✗ ERROR saving results to CSV: {type(e).__name__}: {e}")
+        traceback.print_exc()
+
+
+def save_iteration_data_to_csv(results, sample_name, output_folder=None):
+    """Save per-iteration V1–V4 and σ data to a separate CSV.
+
+    Parameters
+    ----------
+    results : dict
+        Results from ``measure_sigma()`` — must contain ``'iterations'``.
+    sample_name : str
+        Name of the sample (used in the filename).
+    output_folder : str | Path | None
+        Destination folder.  Defaults to the current directory.
+    """
+    iterations = results.get("iterations")
+    if not iterations:
+        return
+
+    try:
+        folder = Path(output_folder) if output_folder else Path.cwd()
+        folder.mkdir(parents=True, exist_ok=True)
+        filepath = folder / f"{sample_name}_sigma_iterations.csv"
+
+        headers = [
+            "Iteration", "V1 (V)", "V2 (V)", "V3 (V)", "V4 (V)",
+            "Delta_V1 (V)", "Delta_V2 (V)", "R1 (Ohm)", "R2 (Ohm)",
+            "Sigma (S/cm)",
+        ]
+
+        def _fmt(v):
+            return f"{v:.6f}" if v is not None else ""
+
+        with open(filepath, "w", encoding="utf-8") as f:
+            f.write(",".join(headers) + "\n")
+            for it in iterations:
+                row = [
+                    str(it["iteration"]),
+                    _fmt(it["v1"]), _fmt(it["v2"]),
+                    _fmt(it["v3"]), _fmt(it["v4"]),
+                    _fmt(it["delta_v1"]), _fmt(it["delta_v2"]),
+                    _fmt(it["R1"]), _fmt(it["R2"]),
+                    f"{it['sigma']:.6f}",
+                ]
+                f.write(",".join(row) + "\n")
+
+        print(f"💾 Iteration data saved to: {filepath}")
+    except Exception as e:
+        print(f"✗ ERROR saving iteration CSV: {type(e).__name__}: {e}")
         traceback.print_exc()
 
 
