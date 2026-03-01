@@ -214,28 +214,39 @@ class _MeasurementWorker(QObject):
         sample_name  = config["sample_name"]
         seebeck_time = config.get("seebeck_time", 480.0)
         filename = f"{sample_name}_{current_temp:.1f}C"
+        self._log(f"Duration: {seebeck_time/60:.1f} min  |  File: {filename}")
 
         try:
             measurement = SeebeckMeasurement(enable_plotting=False)
 
-            # Monkey-patch the plotter update to also emit a Qt signal
-            _orig_update = None
-            if measurement.plotter is not None:
-                _orig_update = measurement.plotter.update
-
+            # Monkey-patch the plotter with a bridge that:
+            #   1. Emits real-time data to the GUI graphs
+            #   2. Logs periodic status to the log panel
+            #   3. Provides a no-op save_plot so the finally block doesn't crash
             _worker_ref = self
+            _point_count = 0
 
             class _QtPlotBridge:
-                """Intercepts Seebeck plotter calls and emits data to GUI."""
+                """Duck-typed plotter replacement for GUI mode."""
+
                 def update(_, t, t1, t2, v1, v2):  # noqa: N805,N803
+                    nonlocal _point_count
+                    _point_count += 1
                     _worker_ref.seebeck_data_point.emit({
                         "time": t, "T1": t1, "T2": t2,
                         "V1": v1, "V2": v2,
                     })
-                    if _orig_update:
-                        _orig_update(t, t1, t2, v1, v2)
+                    # Log a status line every 10 readings
+                    if _point_count % 10 == 1:
+                        _worker_ref._log(
+                            f"Seebeck #{_point_count}  t={t:.0f}s  "
+                            f"T1={t1:.2f}°C  T2={t2:.2f}°C  "
+                            f"ΔT={abs(t1 - t2):.2f}°C"
+                        )
 
-            # Replace the plotter with our bridge so data reaches the GUI
+                def save_plot(_, *args, **kwargs):  # noqa: N805
+                    """No-op — GUI graphs replace matplotlib plots."""
+
             measurement.plotter = _QtPlotBridge()
 
             results = measurement.run_measurement(
@@ -341,8 +352,16 @@ class _MeasurementWorker(QObject):
             # ── Read current temperature ──────────────────────────────────
             self._log("Reading current temperature …")
             self.status_message.emit("Reading temperature …")
-            current_temp = read_current_temperature()
-            self._log(f"Current temperature: {current_temp:.1f} °C")
+            gui_temp = config.get("gui_temperature")
+            daq_temp = read_current_temperature()
+            # Prefer the DAQ reading, but if it returns the 25.0 fallback
+            # and the GUI already has a live Eurotherm reading, use that.
+            if abs(daq_temp - 25.0) < 0.01 and gui_temp is not None:
+                current_temp = round(gui_temp, 1)
+                self._log(f"Using Eurotherm temperature: {current_temp:.1f} °C")
+            else:
+                current_temp = round(daq_temp, 1)
+                self._log(f"Current temperature: {current_temp:.1f} °C")
             self._check_abort("temperature read")
 
             # ── Create folder structure ───────────────────────────────────

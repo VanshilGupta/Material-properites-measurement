@@ -336,6 +336,9 @@ QStatusBar {{
     font-size: 11px;
     border-top: 1px solid {BORDER};
 }}
+QStatusBar::item {{
+    border: none;
+}}
 
 /* ── Log Text Area ───────────────────────────────────────────────────── */
 QPlainTextEdit#LogArea {{

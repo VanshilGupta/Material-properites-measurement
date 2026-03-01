@@ -375,10 +375,19 @@ class SeebeckMeasurement:
             if self.plotter:
                 self._log('info', "Saving real-time plot...")
                 self.plotter.save_plot(filename, output_folder)
-        
-        # Process and save data
-        self._log('info', "Processing and saving data...")
-        results = self.process_and_save_data(filename, output_folder)
+
+            # Always attempt to save collected data, even if the loop
+            # terminated due to an error.  Guard against empty datasets.
+            if self.time_data:
+                self._log('info', "Processing and saving data...")
+                try:
+                    results = self.process_and_save_data(filename, output_folder)
+                except Exception as save_err:
+                    self._log('error', f"Failed to save data: {save_err}")
+                    results = {}
+            else:
+                self._log('info', "No data to save (measurement did not collect readings).")
+                results = {}
         
         return results
     

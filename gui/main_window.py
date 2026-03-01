@@ -578,10 +578,13 @@ class MainWindow(QMainWindow):
 
         # ── Log panel (bottom, resizable via splitter) ────────────────────
         self.log_panel = LogPanel()
+        self.log_panel.collapse_requested.connect(self._toggle_log_panel)
         self.v_splitter.addWidget(self.log_panel)
         self.v_splitter.setStretchFactor(0, 5)
         self.v_splitter.setStretchFactor(1, 1)
         self.v_splitter.setSizes([560, 120])
+        self._log_collapsed = False
+        self._saved_log_height = 120
 
         outer.addWidget(self.v_splitter)
 
@@ -720,6 +723,7 @@ class MainWindow(QMainWindow):
             self.run_btn.setToolTip("Cannot start:\n" + "\n".join(reasons))
 
     def _update_current_temp(self, temp_c: float):
+        self._last_known_temp = temp_c
         self.current_temp_lbl.setText(f"{temp_c:.1f}  \u00b0C")
         self._temp_read_count += 1
         # Log a heartbeat every 30 successful reads (≈ every 30 s) so the
@@ -817,6 +821,7 @@ class MainWindow(QMainWindow):
             "measure_sigma":   m_cfg["measure_conductivity"],
             "measure_seebeck": m_cfg["measure_seebeck"],
             "seebeck_time":    480.0,
+            "gui_temperature": getattr(self, "_last_known_temp", None),
         }
         self.measurement_svc.start(config)
 
@@ -920,6 +925,27 @@ class MainWindow(QMainWindow):
         self._left_collapsed = False
         self._collapse_btn.setText("\u25c0")
         self._collapse_btn.setToolTip("Collapse configuration panel")
+
+    # -- Log panel collapse / expand ---------------------------------------
+
+    def _toggle_log_panel(self):
+        """Toggle the log panel between collapsed (header-only) and expanded."""
+        if self._log_collapsed:
+            # Expand
+            sizes = self.v_splitter.sizes()
+            total = sum(sizes)
+            restore = min(self._saved_log_height, total // 3)
+            self.v_splitter.setSizes([total - restore, restore])
+            self._log_collapsed = False
+        else:
+            # Collapse — save current height, shrink to header-only (24 px)
+            sizes = self.v_splitter.sizes()
+            if sizes[1] > 30:
+                self._saved_log_height = sizes[1]
+            total = sum(sizes)
+            self.v_splitter.setSizes([total - 24, 24])
+            self._log_collapsed = True
+        self.log_panel.set_collapsed(self._log_collapsed)
 
     # -- Graph maximize / restore ------------------------------------------
 

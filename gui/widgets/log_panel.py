@@ -1,11 +1,11 @@
 """Log Panel — timestamped messages at the bottom of the window.
 
-Resized via the vertical splitter in MainWindow.  No collapse button;
-the user resizes or hides the log by dragging the splitter.
+Resized via the vertical splitter in MainWindow.  A collapse button
+in the header lets the user toggle the log area visibility.
 """
 
 from datetime import datetime
-from PySide6.QtCore import Qt, Slot
+from PySide6.QtCore import Qt, Slot, Signal
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPlainTextEdit, QPushButton,
@@ -13,10 +13,19 @@ from PySide6.QtWidgets import (
 
 
 class LogPanel(QWidget):
-    """Read-only scrollable log area with a Clear button."""
+    """Read-only scrollable log area with Clear and Collapse buttons.
+
+    Signals
+    -------
+    collapse_requested()
+        Emitted when the user clicks the ▲/▼ toggle button.
+    """
+
+    collapse_requested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._collapsed = False
         self._build_ui()
 
     def _build_ui(self):
@@ -31,6 +40,15 @@ class LogPanel(QWidget):
 
         hl = QHBoxLayout(header)
         hl.setContentsMargins(10, 0, 6, 0)
+
+        # Collapse / expand toggle
+        self._toggle_btn = QPushButton("\u25bc")
+        self._toggle_btn.setObjectName("IconButton")
+        self._toggle_btn.setCursor(Qt.PointingHandCursor)
+        self._toggle_btn.setToolTip("Collapse log panel")
+        self._toggle_btn.setFixedSize(20, 18)
+        self._toggle_btn.clicked.connect(self.collapse_requested)
+        hl.addWidget(self._toggle_btn)
 
         log_lbl = QLabel("LOG")
         log_lbl.setObjectName("SectionLabel")
@@ -70,3 +88,13 @@ class LogPanel(QWidget):
         self.text_area.setMaximumBlockCount(0)
         self.text_area.clear()
         self.text_area.setMaximumBlockCount(2000)
+
+    def set_collapsed(self, collapsed: bool):
+        """Update the toggle button icon to match collapsed state."""
+        self._collapsed = collapsed
+        if collapsed:
+            self._toggle_btn.setText("\u25b2")
+            self._toggle_btn.setToolTip("Expand log panel")
+        else:
+            self._toggle_btn.setText("\u25bc")
+            self._toggle_btn.setToolTip("Collapse log panel")

@@ -12,9 +12,8 @@ from gui.styles import (
     SUCCESS, DANGER,
 )
 
-# Axis labels and tick text need to be clearly legible on the dark
-# (BG_PRIMARY = #1A1A1A) plot background, so we use TEXT_PRIMARY.
-_AXIS_COLOR = TEXT_PRIMARY
+# Axis label styling for all graph panels.
+_LABEL_STYLE = {"color": "#FFFFFF", "font-size": "13px", "font-weight": "bold"}
 
 # Palette for extra curves (index 0 = default ACCENT, 1+ = extras).
 _CURVE_COLORS = [
@@ -99,17 +98,22 @@ class GraphPanel(QWidget):
         self._plot = pg.PlotWidget()
         self._plot.setBackground(BG_PRIMARY)
 
-        # Axes
+        # Axes — bold white labels for readability on dark background
         x_axis = self._plot.getAxis("bottom")
         y_axis = self._plot.getAxis("left")
 
         x_text = f"{self._x_label} ({self._x_unit})" if self._x_unit else self._x_label
         y_text = f"{self._y_label} ({self._y_unit})" if self._y_unit else self._y_label
 
-        x_axis.setLabel(x_text, color=_AXIS_COLOR)
-        y_axis.setLabel(y_text, color=_AXIS_COLOR)
-        x_axis.setTextPen(_AXIS_COLOR)
-        y_axis.setTextPen(_AXIS_COLOR)
+        x_axis.setLabel(x_text, **_LABEL_STYLE)
+        y_axis.setLabel(y_text, **_LABEL_STYLE)
+
+        # Tick label font: white, slightly larger
+        tick_font = pg.QtGui.QFont("Segoe UI", 10)
+        x_axis.setTickFont(tick_font)
+        y_axis.setTickFont(tick_font)
+        x_axis.setTextPen("#FFFFFF")
+        y_axis.setTextPen("#FFFFFF")
 
         for spine in ("top", "right"):
             self._plot.showAxis(spine)
@@ -123,6 +127,25 @@ class GraphPanel(QWidget):
 
         # Grid
         self._plot.showGrid(x=True, y=True, alpha=0.15)
+
+        # ── Crosshair + tooltip on hover ──────────────────────────────
+        self._vline = pg.InfiniteLine(angle=90, movable=False,
+                                      pen=pg.mkPen("#ffffff", width=1, style=Qt.DashLine))
+        self._hline = pg.InfiniteLine(angle=0, movable=False,
+                                      pen=pg.mkPen("#ffffff", width=1, style=Qt.DashLine))
+        self._vline.setVisible(False)
+        self._hline.setVisible(False)
+        self._plot.addItem(self._vline, ignoreBounds=True)
+        self._plot.addItem(self._hline, ignoreBounds=True)
+
+        self._tooltip = pg.TextItem(color="#FFFFFF", anchor=(0, 1))
+        self._tooltip.setVisible(False)
+        self._plot.addItem(self._tooltip, ignoreBounds=True)
+
+        self._proxy = pg.SignalProxy(
+            self._plot.scene().sigMouseMoved, rateLimit=60,
+            slot=self._on_mouse_moved,
+        )
 
         # Create curves
         if self._curve_specs:
@@ -182,3 +205,47 @@ class GraphPanel(QWidget):
             xd = np.append(xd, x)
             yd = np.append(yd, y)
         curve.setData(xd, yd)
+
+    # ── Hover crosshair + tooltip ─────────────────────────────────────
+
+    def _on_mouse_moved(self, evt):
+        pos = evt[0]
+        vb = self._plot.plotItem.vb
+        if not self._plot.sceneBoundingRect().contains(pos):
+            self._vline.setVisible(False)
+            self._hline.setVisible(False)
+            self._tooltip.setVisible(False)
+            return
+
+        mouse_point = vb.mapSceneToView(pos)
+        x, y = mouse_point.x(), mouse_point.y()
+
+        self._vline.setPos(x)
+        self._hline.setPos(y)
+        self._vline.setVisible(True)
+        self._hline.setVisible(True)
+
+        # Find the nearest data point across all visible curves
+        best_dist = float("inf")
+        best_label = ""
+        curves = (list(self._named_curves.items())
+                  if self._named_curves else [("value", self._curve)])
+        for name, curve in curves:
+            xd, yd = curve.getData()
+            if xd is None or len(xd) == 0:
+                continue
+            idx = np.argmin(np.abs(xd - x))
+            dist = abs(xd[idx] - x)
+            if dist < best_dist:
+                best_dist = dist
+                x_unit = self._x_unit or ""
+                y_unit = self._y_unit or ""
+                best_label = (f"{name}: ({xd[idx]:.2f} {x_unit}, "
+                              f"{yd[idx]:.2f} {y_unit})")
+
+        if best_label:
+            self._tooltip.setText(best_label)
+            self._tooltip.setPos(x, y)
+            self._tooltip.setVisible(True)
+        else:
+            self._tooltip.setVisible(False)
