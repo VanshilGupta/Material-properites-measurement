@@ -145,7 +145,7 @@ def _require_ps():
     return state.ps
 
 def _require_eurotherm():
-    if state.eurotherm is None or not state.eurotherm.is_connected:
+    if state.eurotherm is None or not state.eurotherm.is_connected():
         raise HTTPException(400, "Eurotherm not connected. Call POST /eurotherm/connect first.")
     return state.eurotherm
 
@@ -160,7 +160,7 @@ def health():
         "status": "ok",
         "daq_connected":       state.daq is not None and state.daq._is_connected,
         "ps_connected":        state.ps  is not None and state.ps._is_connected,
-        "eurotherm_connected": state.eurotherm is not None and state.eurotherm.is_connected,
+        "eurotherm_connected": state.eurotherm is not None and state.eurotherm.is_connected(),
     }
 
 
@@ -318,14 +318,16 @@ def eurotherm_connect():
             baud_rate=EUROTHERM_BAUD_RATE,
             timeout=EUROTHERM_TIMEOUT,
         )
-    if not state.eurotherm.is_connected:
-        state.eurotherm.connect()
-    return _ok()
+    if not state.eurotherm.is_connected():
+        ok = state.eurotherm.connect()
+        if not ok:
+            raise HTTPException(500, f"Eurotherm failed to connect on COM{EUROTHERM_COM_PORT}. Check cable/port.")
+    return _ok({"com_port": EUROTHERM_COM_PORT})
 
 
 @app.post("/eurotherm/disconnect", dependencies=[Depends(verify_token)])
 def eurotherm_disconnect():
-    if state.eurotherm and state.eurotherm.is_connected:
+    if state.eurotherm and state.eurotherm.is_connected():
         state.eurotherm.disconnect()
     return _ok()
 
