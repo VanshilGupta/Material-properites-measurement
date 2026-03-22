@@ -41,11 +41,17 @@ if _project_root not in sys.path:
 
 from output_manager import (                                # noqa: E402
     create_single_measurement_structure,
+    create_temp_sweep_structure,
+    create_temperature_folder,
     finalize_logging,
 )
 from measure_sigma import measure_sigma, save_results_to_csv, save_iteration_data_to_csv  # noqa: E402
 from seebeck_measurement import SeebeckMeasurement           # noqa: E402
 from constants import read_current_temperature                # noqa: E402
+from eurotherm_control import EurothermController              # noqa: E402
+from constants import (                                       # noqa: E402
+    EUROTHERM_COM_PORT,
+)
 
 # Instrument name constants (avoids duplicating literals).
 _INST_PS  = "Power Supply"
@@ -353,6 +359,62 @@ class _MeasurementWorker(QObject):
         )
         return global_logger, temp_folder, temp_logger, sigma_folder, seebeck_folder
 
+    # ── Seebeck time-series graph saving ──────────────────────────────────
+
+    def _save_seebeck_time_series_plots(self, seebeck_folder: Path,
+                                         filename: str, results: dict):
+        """Save Time vs T1/T2 and Time vs V1/V2 plots to disk."""
+        try:
+            import matplotlib
+            matplotlib.use("Agg")  # non-interactive backend
+            import matplotlib.pyplot as plt
+            import numpy as np
+
+            data_avg = results.get("data_avg")
+            if data_avg is None or len(data_avg) == 0:
+                return
+
+            time_min = data_avg[:, 0] / 60.0   # seconds → minutes
+            T1 = data_avg[:, 1]
+            T2 = data_avg[:, 2]
+            V1_uV = data_avg[:, 3]  # already in µV
+            V2_uV = data_avg[:, 4]
+
+            plots_dir = seebeck_folder / "plots"
+            plots_dir.mkdir(parents=True, exist_ok=True)
+
+            # ── Time vs T1/T2 ─────────────────────────────────────────────
+            fig1, ax1 = plt.subplots(figsize=(10, 5))
+            ax1.plot(time_min, T1, "r-", label="T\u2081", alpha=0.8)
+            ax1.plot(time_min, T2, "b-", label="T\u2082", alpha=0.8)
+            ax1.set_xlabel("Time (min)", fontsize=11, fontweight="bold")
+            ax1.set_ylabel("Temperature (°C)", fontsize=11, fontweight="bold")
+            ax1.set_title(f"{filename} — Temperature vs Time", fontsize=13, fontweight="bold")
+            ax1.legend(fontsize=10)
+            ax1.grid(True, alpha=0.3)
+            fig1.tight_layout()
+            fig1.savefig(plots_dir / f"{filename}_time_vs_temperature.png",
+                         dpi=200, bbox_inches="tight")
+            plt.close(fig1)
+
+            # ── Time vs V1/V2 ─────────────────────────────────────────────
+            fig2, ax2 = plt.subplots(figsize=(10, 5))
+            ax2.plot(time_min, V1_uV, "m-", label="V\u2081", alpha=0.8)
+            ax2.plot(time_min, V2_uV, "c-", label="V\u2082", alpha=0.8)
+            ax2.set_xlabel("Time (min)", fontsize=11, fontweight="bold")
+            ax2.set_ylabel("Voltage (µV)", fontsize=11, fontweight="bold")
+            ax2.set_title(f"{filename} — Voltage vs Time", fontsize=13, fontweight="bold")
+            ax2.legend(fontsize=10)
+            ax2.grid(True, alpha=0.3)
+            fig2.tight_layout()
+            fig2.savefig(plots_dir / f"{filename}_time_vs_voltage.png",
+                         dpi=200, bbox_inches="tight")
+            plt.close(fig2)
+
+            self._log("Saved time-series plots (T and V vs time)")
+        except Exception as exc:
+            self._log(f"Warning: could not save time-series plots: {exc}")
+
     # ── main entry point (called via signal) ─────────────────────────────
 
     @Slot(dict)
@@ -368,7 +430,16 @@ class _MeasurementWorker(QObject):
             measure_sigma      : bool
             measure_seebeck    : bool
             seebeck_time       : float  (seconds, default 480)
+            cycle_mode         : bool   (optional, default False)
+            temperatures       : list[float]  (cycle mode — list of target temps)
+            rate               : float  (cycle mode — ramp rate °C/min)
+            stability_time     : float  (seconds — wait time per temp, default 1200)
+            heating_only       : bool   (cycle mode — heat only or heat+cool)
         """
+        # Dispatch to cycle mode if requested
+        if config.get("cycle_mode", False):
+            return self._run_cycle(config)
+
         self.reset_abort()
         do_sigma   = config["measure_sigma"]
         do_seebeck = config["measure_seebeck"]
@@ -397,6 +468,11 @@ class _MeasurementWorker(QObject):
             else:
                 _current_temp = round(daq_temp, 1)
                 self._log(f"Current temperature: {_current_temp:.1f} °C")
+
+            # Guard against invalid temperature for folder name
+            if _current_temp <= 0:
+                self._log("⚠ Temperature ≤ 0 — using 'experiment_data' as folder name")
+
             self._check_abort("temperature read")
 
             # ── Create folder structure ───────────────────────────────────
@@ -426,6 +502,12 @@ class _MeasurementWorker(QObject):
                     config, _current_temp, seebeck_folder,
                     temp_logger, global_logger)
                 _seebeck_elapsed = time.time() - _t0
+
+                # Save time-series plots for Seebeck
+                if seebeck_results:
+                    fname = f"{config['sample_name']}_{_current_temp:.1f}C"
+                    self._save_seebeck_time_series_plots(
+                        seebeck_folder, fname, seebeck_results)
 
             # ── Summary ──────────────────────────────────────────────────
             parts = []
@@ -478,6 +560,259 @@ class _MeasurementWorker(QObject):
 
         finally:
             time.sleep = _real_sleep
+
+    # ── cycle measurement mode ───────────────────────────────────────────
+
+    def _run_cycle(self, config: dict):
+        """Run measurements across multiple temperatures.
+
+        For each temperature point:
+          1. Set Eurotherm setpoint
+          2. Wait stability_time (default 20 min)
+          3. Read actual temperature
+          4. Create folder named after actual temperature
+          5. Run σ and/or Seebeck measurements
+        """
+        self.reset_abort()
+        _real_sleep = self._install_abortable_sleep()
+
+        temperatures  = config.get("temperatures", [])
+        ramp_rate     = config.get("rate", 10.0)
+        stability_sec = config.get("stability_time", 1200.0)  # default 20 min
+        do_sigma      = config["measure_sigma"]
+        do_seebeck    = config["measure_seebeck"]
+        sample_name   = config["sample_name"]
+
+        global_logger: Optional[logging.Logger] = None
+        _t_run_start = time.time()
+        _data_path = ""
+
+        eurotherm = None
+
+        try:
+            # ── Create sweep-level folder structure ───────────────────────
+            sample_folder, global_logger = create_temp_sweep_structure(sample_name)
+            self._make_logger(global_logger)
+            _data_path = str(sample_folder)
+
+            self._log(f"━━ Temperature Cycle: {len(temperatures)} points ━━")
+            self._log(f"Points: {temperatures}")
+            self._log(f"Ramp rate: {ramp_rate} °C/min  |  Wait: {stability_sec/60:.0f} min")
+            global_logger.info(f"Cycle: {temperatures}, rate={ramp_rate}, wait={stability_sec}s")
+
+            # ── Connect to Eurotherm ──────────────────────────────────────
+            try:
+                eurotherm = EurothermController(com_port=EUROTHERM_COM_PORT)
+                eurotherm.set_logger(global_logger)
+                if not eurotherm.connect():
+                    self._log("⚠ Could not connect to Eurotherm — proceeding without temp control")
+                    eurotherm = None
+                else:
+                    eurotherm.set_auto_mode()
+                    eurotherm.set_ramp_rate(ramp_rate)
+                    self._log("Eurotherm connected ✓")
+            except Exception as exc:
+                self._log(f"⚠ Eurotherm connection error: {exc} — proceeding without")
+                eurotherm = None
+
+            # ── Loop over temperature points ─────────────────────────────
+            for idx, target_temp in enumerate(temperatures):
+                self._check_abort("cycle loop")
+
+                point_label = f"[{idx+1}/{len(temperatures)}]"
+                self._log(f"\n{'━'*50}")
+                self._log(f"{point_label} Target: {target_temp:.1f} °C")
+                self._log(f"{'━'*50}")
+                self.status_message.emit(
+                    f"Cycle {point_label} — setting {target_temp:.1f} °C"
+                )
+                global_logger.info(f"{point_label} Target: {target_temp}°C")
+
+                # 1. Set setpoint
+                if eurotherm is not None:
+                    try:
+                        eurotherm.set_ramp_rate(ramp_rate)
+                        eurotherm.set_temperature(target_temp)
+                        self._log(f"Setpoint → {target_temp:.1f} °C  (ramp {ramp_rate} °C/min)")
+                    except Exception as exc:
+                        self._log(f"⚠ Failed to set temperature: {exc}")
+
+                # 2. Wait for stability_time
+                wait_min = stability_sec / 60.0
+                self._log(f"Waiting {wait_min:.0f} min for stabilisation …")
+                self.status_message.emit(
+                    f"Cycle {point_label} — waiting {wait_min:.0f} min"
+                )
+
+                # Countdown in 60-second chunks
+                remaining = stability_sec
+                while remaining > 0:
+                    self._check_abort("stability wait")
+                    chunk = min(remaining, 60.0)
+                    self._interruptible_sleep(chunk, "stability wait")
+                    remaining -= chunk
+                    mins_left = remaining / 60.0
+                    if mins_left > 0:
+                        # Read live temperature during wait if possible
+                        live_t = "?"
+                        if eurotherm is not None:
+                            try:
+                                t = eurotherm.read_temperature()
+                                if t is not None:
+                                    live_t = f"{t:.1f}"
+                            except Exception:
+                                pass
+                        self._log(
+                            f"  ⏳ {mins_left:.0f} min remaining  "
+                            f"(current: {live_t} °C)"
+                        )
+
+                # 3. Read actual temperature
+                actual_temp = target_temp  # fallback
+                if eurotherm is not None:
+                    try:
+                        t = eurotherm.read_temperature()
+                        if t is not None and t > 0:
+                            actual_temp = round(t, 1)
+                    except Exception:
+                        pass
+                else:
+                    # Try DAQ
+                    try:
+                        t = read_current_temperature()
+                        if t is not None and t > 0:
+                            actual_temp = round(t, 1)
+                    except Exception:
+                        pass
+
+                # Use gui_temperature as another fallback
+                gui_temp = config.get("gui_temperature")
+                if actual_temp <= 0 and gui_temp is not None and gui_temp > 0:
+                    actual_temp = round(gui_temp, 1)
+
+                self._log(f"Actual temperature: {actual_temp:.1f} °C  (target was {target_temp:.1f} °C)")
+                global_logger.info(f"Actual temp: {actual_temp}°C")
+
+                # 4. Create temperature folder with ACTUAL temperature
+                if actual_temp > 0:
+                    meas_types = []
+                    if do_sigma:
+                        meas_types.append("Sigma")
+                    if do_seebeck:
+                        meas_types.append("Seebeck")
+                    temp_folder, temp_logger = create_temperature_folder(
+                        sample_folder, actual_temp, meas_types
+                    )
+                else:
+                    # Fallback folder name
+                    self._log("⚠ Temperature ≤ 0 — using 'experiment_data' folder")
+                    temp_folder = sample_folder / "experiment_data"
+                    temp_folder.mkdir(parents=True, exist_ok=True)
+                    from output_manager import setup_temperature_logger
+                    temp_logger = setup_temperature_logger(temp_folder, actual_temp)
+                    if do_sigma:
+                        (temp_folder / "Sigma").mkdir(exist_ok=True)
+                    if do_seebeck:
+                        (temp_folder / "Seebeck").mkdir(exist_ok=True)
+
+                self._make_logger(temp_logger)
+
+                sigma_folder   = temp_folder / "Sigma"
+                seebeck_folder = temp_folder / "Seebeck"
+
+                # 5. Run measurements
+                sigma_results = None
+                if do_sigma:
+                    self.graph_seebeck_clear_requested = True
+                    sigma_results = self._run_sigma(
+                        config, actual_temp, sigma_folder,
+                        temp_logger, global_logger)
+
+                if do_sigma and do_seebeck:
+                    self._check_abort("between measurements")
+                    self._log("Safety pause (2 s) …")
+                    self._interruptible_sleep(2.0, "safety pause")
+
+                seebeck_results = None
+                if do_seebeck:
+                    seebeck_results = self._run_seebeck(
+                        config, actual_temp, seebeck_folder,
+                        temp_logger, global_logger)
+
+                    # Save time-series plots
+                    if seebeck_results:
+                        fname = f"{sample_name}_{actual_temp:.1f}C"
+                        self._save_seebeck_time_series_plots(
+                            seebeck_folder, fname, seebeck_results)
+
+                # Log point summary
+                parts = []
+                if sigma_results:
+                    parts.append(f"σ={sigma_results['corr_sigma']:.2e}")
+                if seebeck_results:
+                    parts.append(f"S={seebeck_results['Seebeck']:.2f} µV/K")
+                point_summary = ", ".join(parts) if parts else "no results"
+                self._log(f"{point_label} Done: {point_summary}")
+                global_logger.info(f"{point_label} Done: {point_summary}")
+
+                finalize_logging(temp_logger, success=True)
+
+            # ── Cool down ─────────────────────────────────────────────────
+            if eurotherm is not None:
+                try:
+                    eurotherm.set_temperature(25.0)
+                    self._log("Cool-down: setpoint → 25 °C")
+                except Exception:
+                    pass
+
+            # ── Final summary ─────────────────────────────────────────────
+            total = time.time() - _t_run_start
+            summary = (
+                f"Cycle complete — {len(temperatures)} temperature points "
+                f"in {total/60:.1f} min"
+            )
+            self._log(summary)
+            self.status_message.emit(summary)
+            finalize_logging(global_logger, success=True)
+            self.phase_changed.emit("idle")
+            self.measurement_finished.emit(True, summary, {
+                "data_path": _data_path,
+                "total_elapsed": total,
+                "n_points": len(temperatures),
+            })
+
+        except MeasurementAborted:
+            self._log("Cycle ABORTED by user")
+            self.status_message.emit("Cycle aborted")
+            if global_logger:
+                finalize_logging(global_logger, success=False, error_msg="User aborted")
+            self._set_instruments("idle")
+            self.phase_changed.emit("idle")
+            self.measurement_finished.emit(False, "Cycle aborted by user", {
+                "data_path": _data_path,
+                "total_elapsed": time.time() - _t_run_start,
+            })
+
+        except Exception as exc:
+            self._log(f"FATAL: {exc}")
+            self.status_message.emit(f"Error: {exc}")
+            if global_logger:
+                finalize_logging(global_logger, success=False, error_msg=str(exc))
+            self._set_instruments("idle")
+            self.phase_changed.emit("idle")
+            self.measurement_finished.emit(False, str(exc), {
+                "data_path": _data_path,
+                "total_elapsed": time.time() - _t_run_start,
+            })
+
+        finally:
+            time.sleep = _real_sleep
+            # Disconnect Eurotherm
+            if eurotherm is not None:
+                try:
+                    eurotherm.disconnect()
+                except Exception:
+                    pass
 
     def _finalize_loggers(self, global_logger, temp_logger, error_msg: str):
         """Close file loggers on failure / abort."""

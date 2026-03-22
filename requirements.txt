@@ -31,6 +31,16 @@ pyqtgraph>=0.13.0
 colorama>=0.4.6
 
 # ============================================================================
+# Remote Instrument Mode (instrument_server.py + remote_instruments.py)
+# ============================================================================
+# Required on the lab PC (server side):
+fastapi>=0.110.0
+uvicorn>=0.29.0
+
+# Required on your PC (client side, used by remote_instruments.py):
+requests>=2.31.0
+
+# ============================================================================
 # Installation Instructions:
 # ============================================================================
 # 

@@ -5,7 +5,9 @@ import pyqtgraph as pg
 from PySide6.QtCore    import Qt, Signal
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
+    QFileDialog, QApplication,
 )
+from PySide6.QtGui import QImage, QPainter
 from gui.styles import (
     BG_PRIMARY, BG_PANEL, ACCENT,
     TEXT_PRIMARY, TEXT_SECONDARY, BORDER,
@@ -82,7 +84,29 @@ class GraphPanel(QWidget):
         title_lbl = QLabel(self._title)
         title_lbl.setObjectName("SectionLabel")
 
-        self._max_btn = QPushButton("⛶")
+        # Export buttons — small icon-style buttons
+        self._save_png_btn = QPushButton("\U0001F4E5")  # 📥
+        self._save_png_btn.setObjectName("IconButton")
+        self._save_png_btn.setToolTip("Save graph as PNG")
+        self._save_png_btn.setCursor(Qt.PointingHandCursor)
+        self._save_png_btn.setFixedSize(26, 22)
+        self._save_png_btn.clicked.connect(self._export_png)
+
+        self._save_csv_btn = QPushButton("\U0001F4CA")  # 📊
+        self._save_csv_btn.setObjectName("IconButton")
+        self._save_csv_btn.setToolTip("Save plotted data as CSV")
+        self._save_csv_btn.setCursor(Qt.PointingHandCursor)
+        self._save_csv_btn.setFixedSize(26, 22)
+        self._save_csv_btn.clicked.connect(self._export_csv)
+
+        self._copy_btn = QPushButton("\U0001F4CB")  # 📋
+        self._copy_btn.setObjectName("IconButton")
+        self._copy_btn.setToolTip("Copy graph to clipboard")
+        self._copy_btn.setCursor(Qt.PointingHandCursor)
+        self._copy_btn.setFixedSize(26, 22)
+        self._copy_btn.clicked.connect(self._copy_to_clipboard)
+
+        self._max_btn = QPushButton("\u26f6")
         self._max_btn.setObjectName("IconButton")
         self._max_btn.setToolTip("Maximize this graph")
         self._max_btn.setCursor(Qt.PointingHandCursor)
@@ -90,6 +114,9 @@ class GraphPanel(QWidget):
 
         hl.addWidget(title_lbl)
         hl.addStretch()
+        hl.addWidget(self._save_png_btn)
+        hl.addWidget(self._save_csv_btn)
+        hl.addWidget(self._copy_btn)
         hl.addWidget(self._max_btn)
 
         return header
@@ -289,3 +316,68 @@ class GraphPanel(QWidget):
         self._tooltip.setText("\n".join(lines))
         self._tooltip.setPos(x, y)
         self._tooltip.setVisible(True)
+
+    # ── Export helpers ─────────────────────────────────────────────────────
+
+    def _export_png(self):
+        """Save the current plot as a PNG file."""
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save Graph as PNG",
+            f"{self._title.replace(' ', '_')}.png",
+            "PNG Images (*.png);;All Files (*)",
+        )
+        if path:
+            try:
+                import pyqtgraph.exporters
+                exporter = pyqtgraph.exporters.ImageExporter(
+                    self._plot.plotItem
+                )
+                exporter.parameters()['width'] = 1200
+                exporter.export(path)
+            except Exception:
+                # Fallback: grab the widget as an image
+                pixmap = self._plot.grab()
+                pixmap.save(path, "PNG")
+
+    def _export_csv(self):
+        """Export plotted data to a CSV file."""
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save Graph Data as CSV",
+            f"{self._title.replace(' ', '_')}_data.csv",
+            "CSV Files (*.csv);;All Files (*)",
+        )
+        if not path:
+            return
+
+        import csv
+        x_hdr = self._x_label
+        curves = (list(self._named_curves.items())
+                  if self._named_curves else [(self._y_label, self._curve)])
+
+        # Gather all data
+        all_x = None
+        columns = {}
+        for name, curve in curves:
+            xd, yd = curve.getData()
+            if xd is None or len(xd) == 0:
+                continue
+            if all_x is None:
+                all_x = xd
+            columns[name] = yd
+
+        if all_x is None:
+            return
+
+        with open(path, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow([x_hdr] + list(columns.keys()))
+            for i in range(len(all_x)):
+                row = [all_x[i]]
+                for col in columns.values():
+                    row.append(col[i] if i < len(col) else "")
+                writer.writerow(row)
+
+    def _copy_to_clipboard(self):
+        """Copy the plot image to the system clipboard."""
+        pixmap = self._plot.grab()
+        QApplication.clipboard().setPixmap(pixmap)

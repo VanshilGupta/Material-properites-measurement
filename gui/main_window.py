@@ -952,6 +952,12 @@ class MainWindow(QMainWindow):
         else:
             seebeck_time = 480.0  # 8 minutes default
 
+        # Resolve stability wait time (testing mode or default 20 min)
+        if m_cfg.get("testing_mode", False):
+            stability_time = m_cfg.get("stability_time_min", 20.0) * 60.0
+        else:
+            stability_time = 1200.0  # 20 minutes default
+
         config = {
             "sample_name":     name,
             "diameter":        diameter,
@@ -961,6 +967,29 @@ class MainWindow(QMainWindow):
             "seebeck_time":    seebeck_time,
             "gui_temperature": getattr(self, "_last_known_temp", None),
         }
+
+        # Cycle mode: generate temperature list and add cycle params
+        if m_cfg["cycle_mode"]:
+            import numpy as np
+            start = t_cfg["start_temp"]
+            stop  = t_cfg["stop_temp"]
+            step  = t_cfg["step"]
+            # Generate list: start, start+step, ..., up to stop (inclusive)
+            if start <= stop:
+                temperatures = list(np.arange(start, stop + step * 0.01, step))
+            else:
+                temperatures = list(np.arange(start, stop - step * 0.01, -step))
+            # Append cooling leg if Heating + Cooling is selected
+            if not m_cfg["heating_only"] and len(temperatures) > 1:
+                cooling = list(reversed(temperatures[:-1]))
+                temperatures.extend(cooling)
+
+            config["cycle_mode"]      = True
+            config["temperatures"]    = [float(t) for t in temperatures]
+            config["rate"]            = t_cfg["rate"]
+            config["stability_time"]  = stability_time
+            config["heating_only"]    = m_cfg["heating_only"]
+
         self.measurement_svc.start(config)
 
     def _on_abort(self):

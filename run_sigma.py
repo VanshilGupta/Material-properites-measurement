@@ -144,7 +144,8 @@ def run_sigma_temperature_sweep(
     thickness: float,
     diameter: float,
     temperatures: list,
-    ramp_rate: float
+    ramp_rate: float,
+    stability_wait: float = 1200.0
 ):
     """
     Run sigma measurements across multiple temperatures.
@@ -210,16 +211,11 @@ def run_sigma_temperature_sweep(
                 eurotherm.set_temperature(target_temp)
                 
                 # Wait for stabilization
-                stable = eurotherm.wait_for_stability(
-                    target=target_temp,
-                    tolerance=EUROTHERM_STABILITY_TOLERANCE,
-                    stable_time=EUROTHERM_STABILITY_TIME,
-                    timeout=EUROTHERM_STABILITY_TIMEOUT
-                )
+                import time as _time
+                print(f"  Waiting {stability_wait/60:.0f} min for stabilisation ...")
+                _time.sleep(stability_wait)
                 actual_temp = eurotherm.read_temperature()
             
-            if not stable:
-                global_logger.warning(f"Temperature did not stabilize at {target_temp}°C, proceeding anyway")
             
             # Create temperature folder
             temp_folder, temp_logger = create_temperature_folder(
@@ -389,7 +385,19 @@ def main():
         confirm = input("Proceed with temperature sweep? (y/n) [default: y]: ").strip().lower()
         
         if confirm != 'n':
-            run_sigma_temperature_sweep(sample_name, thickness, diameter, temperatures, ramp_rate)
+            # Ask for stability wait time
+            try:
+                stability_input = input(
+                    "Enter stability wait time in minutes (default: 20): "
+                ).strip() or "20"
+                stability_wait = float(stability_input) * 60.0
+            except ValueError:
+                stability_wait = 1200.0
+            run_sigma_temperature_sweep(
+                sample_name, thickness, diameter,
+                temperatures, ramp_rate,
+                stability_wait=stability_wait,
+            )
         else:
             print("Cancelled.")
     else:

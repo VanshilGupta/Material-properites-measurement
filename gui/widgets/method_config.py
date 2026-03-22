@@ -168,6 +168,33 @@ class MethodConfigPanel(QGroupBox):
         self._test_time_row.setVisible(False)
         vbox.addWidget(self._test_time_row)
 
+        # Stability wait time row (visible only when testing mode is ON)
+        self._stability_time_row = QWidget()
+        stab_hl = QHBoxLayout(self._stability_time_row)
+        stab_hl.setContentsMargins(0, 0, 0, 0)
+        stab_hl.setSpacing(6)
+        stab_lbl = QLabel("Stability wait:")
+        stab_lbl.setStyleSheet("background: transparent;")
+        stab_lbl.setToolTip(
+            "Time to wait after setting a new temperature setpoint\n"
+            "before starting the measurement (cycle mode)"
+        )
+        self.stability_time_spin = QDoubleSpinBox()
+        self.stability_time_spin.setRange(1.0, 120.0)
+        self.stability_time_spin.setValue(20.0)
+        self.stability_time_spin.setSuffix(" min")
+        self.stability_time_spin.setDecimals(1)
+        self.stability_time_spin.setSingleStep(1.0)
+        self.stability_time_spin.setFixedWidth(100)
+        self.stability_time_spin.setToolTip(
+            "Wait time after setting setpoint before measuring (default 20 min)"
+        )
+        stab_hl.addWidget(stab_lbl)
+        stab_hl.addWidget(self.stability_time_spin)
+        stab_hl.addStretch()
+        self._stability_time_row.setVisible(False)
+        vbox.addWidget(self._stability_time_row)
+
         # Initial state: cycle radios disabled, none checked
         self._set_cycle_widgets_enabled(False)
 
@@ -209,6 +236,7 @@ class MethodConfigPanel(QGroupBox):
     def _on_testing_toggled(self, state):
         """Show or hide testing-mode parameters."""
         self._test_time_row.setVisible(bool(state))
+        self._stability_time_row.setVisible(bool(state))
 
     # ── Public API ────────────────────────────────────────────────────────
 
@@ -227,4 +255,5 @@ class MethodConfigPanel(QGroupBox):
             "measure_conductivity": self.chk_conductivity.isChecked(),
             "testing_mode":         self.chk_testing.isChecked(),
             "seebeck_time_min":     self.seebeck_time_spin.value(),
+            "stability_time_min":   self.stability_time_spin.value(),
         }
