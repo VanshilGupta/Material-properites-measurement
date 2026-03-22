@@ -102,6 +102,10 @@ class _MeasurementWorker(QObject):
     sigma_data_point     = Signal(dict)       # real-time per-iteration sigma data
     seebeck_fit_ready    = Signal(dict)       # V1, V2 arrays + fit params
     phase_changed        = Signal(str)        # "sigma" | "seebeck" | "idle"
+    
+    # Cycle mode hooks
+    cycle_point_starting = Signal(int, float)             # (index, target_temp)
+    cycle_point_completed = Signal(float, object, object) # (actual_temp, sigma_res, seebeck_res)
     measurement_finished = Signal(bool, str, dict)  # (success, summary, metadata)
 
     def __init__(self):
@@ -340,6 +344,7 @@ class _MeasurementWorker(QObject):
         mtype = "sigma" if do_sigma else "seebeck"
         result = create_single_measurement_structure(
             config["sample_name"], mtype, temperature=current_temp,
+            base_dir=config.get("base_dir"),
         )
         _, global_logger, temp_folder, temp_logger, _ = result
 
@@ -591,7 +596,9 @@ class _MeasurementWorker(QObject):
 
         try:
             # ── Create sweep-level folder structure ───────────────────────
-            sample_folder, global_logger = create_temp_sweep_structure(sample_name)
+            sample_folder, global_logger = create_temp_sweep_structure(
+                sample_name, config.get("base_dir")
+            )
             self._make_logger(global_logger)
             _data_path = str(sample_folder)
 
@@ -618,6 +625,7 @@ class _MeasurementWorker(QObject):
             # ── Loop over temperature points ─────────────────────────────
             for idx, target_temp in enumerate(temperatures):
                 self._check_abort("cycle loop")
+                self.cycle_point_starting.emit(idx, target_temp)
 
                 point_label = f"[{idx+1}/{len(temperatures)}]"
                 self._log(f"\n{'━'*50}")
@@ -755,6 +763,8 @@ class _MeasurementWorker(QObject):
                 self._log(f"{point_label} Done: {point_summary}")
                 global_logger.info(f"{point_label} Done: {point_summary}")
 
+                self.cycle_point_completed.emit(actual_temp, sigma_results, seebeck_results)
+
                 finalize_logging(temp_logger, success=True)
 
             # ── Cool down ─────────────────────────────────────────────────
@@ -847,6 +857,10 @@ class MeasurementService(QObject):
     seebeck_fit_ready    = Signal(dict)
     phase_changed        = Signal(str)
     measurement_finished = Signal(bool, str, dict)
+    
+    # Cycle mode hooks
+    cycle_point_starting = Signal(int, float)             # (index, target_temp)
+    cycle_point_completed = Signal(float, object, object) # (actual_temp, sigma_res, seebeck_res)
 
     # Private signal to invoke the worker's ``run`` slot across threads.
     _request_run = Signal(dict)
@@ -868,6 +882,8 @@ class MeasurementService(QObject):
         self._worker.seebeck_fit_ready.connect(self.seebeck_fit_ready)
         self._worker.phase_changed.connect(self.phase_changed)
         self._worker.measurement_finished.connect(self.measurement_finished)
+        self._worker.cycle_point_starting.connect(self.cycle_point_starting)
+        self._worker.cycle_point_completed.connect(self.cycle_point_completed)
 
         # Wire the run request.
         self._request_run.connect(self._worker.run)
