@@ -69,7 +69,7 @@ class TemperatureProfilePanel(QGroupBox):
         self.rate_spin.setValue(10.0)
         self.rate_spin.setSuffix("  \u00b0C/min")
         self.rate_spin.setDecimals(1)
-        self.rate_spin.setFixedWidth(140)
+        self.rate_spin.setFixedWidth(170)
         self.rate_spin.setCursor(Qt.PointingHandCursor)
         self.rate_spin.setToolTip(
             "Ramp rate: how fast the furnace approaches the target (°C/min)"

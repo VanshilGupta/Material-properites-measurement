@@ -30,7 +30,6 @@ from constants import (
 
 # Total measurement duration (seconds)
 DEFAULT_MEASUREMENT_TIME = 480  # 8 minutes
-MEASUREMENT_TIME = DEFAULT_MEASUREMENT_TIME  # Backwards compatibility
 
 # Maximum temperature difference threshold (°C)
 MAX_TEMP_DIFFERENCE = 8.0
@@ -48,19 +47,19 @@ HEATER_CURRENT = 0.3
 # Gradient heater voltage limit (Volts)
 HEATER_VOLTAGE = 10.0
 
-# Heater ON duration at start (seconds)
-HEATER_ON_DURATION= 60
+# Heater ON duration at start of each measurement half (seconds)
+HEATER_ON_DURATION = 60
 
 
 # ============================================================================
 # DAQ Configuration - Seebeck Specific
 # ============================================================================
 
-# Channel mapping for voltage readings
-# Order: [U1_1, V1_1, U2_1, V2_1, U2_2, V1_2, U1_2]
-DAQ_CHANNELS = [101, 106, 
-
-111, 116, 111, 106, 101]
+# DAQ scan list — symmetric pattern reads thermocouple/sample voltages
+# forward then backward to bracket V2's center timestamp.  Forward/backward
+# averaging cancels DAQ channel-switch time drift.
+# Order: [U1_1, V1_1, U2_1, V2, U2_2, V1_2, U1_2]
+DAQ_CHANNELS = [101, 106, 111, 116, 111, 106, 101]
 
 # Note: DAQ_NPLC, DAQ_VOLTAGE_RANGE, and DAQ_TIMEOUT are imported from root constants.py
 

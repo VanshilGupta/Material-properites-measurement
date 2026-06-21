@@ -1,0 +1,7 @@
+01-03-2026 16:42:58 | INFO     | --- Temperature sweep started ---
+01-03-2026 16:42:58 | INFO     | Sample: test
+01-03-2026 16:42:58 | INFO     | Output: C:\Personal\Titas sir\ONS\Seeback-sigma-measurement-app\data\test
+01-03-2026 16:42:58 | INFO     | Starting measurement — test (2.0 mm × 10.0 mm) at -0.0 °C
+01-03-2026 16:44:49 | INFO     | SIGMA completed: 1.49e+02 S/cm
+01-03-2026 16:44:49 | INFO     | --- Measurement completed successfully ---
+01-03-2026 16:44:49 | INFO     | End: 01-03-2026 16:44:49

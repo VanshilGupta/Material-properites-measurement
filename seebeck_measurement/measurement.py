@@ -4,12 +4,18 @@ import logging
 import numpy as np
 import time
 
-from seebeck_measurement.config import DAQ_CHANNELS, HEATER_ON_DURATION, MAX_SAMPLES, MAX_TEMP_DIFFERENCE, PLOT_UPDATE_INTERVAL
-from .instruments import DAQController, PowerSupplyController, get_daq, get_power_supply
-from .temperature_conversion import temp_to_voltage, voltage_to_temp
-from .data_processing import average_data, save_to_csv
+from .config import (
+    DAQ_CHANNELS,
+    HEATER_ON_DURATION,
+    MAX_SAMPLES,
+    MAX_TEMP_DIFFERENCE,
+    PLOT_UPDATE_INTERVAL,
+)
 from .curve_fitting import fit_v1_v2_and_calculate_seebeck
+from .data_processing import save_to_csv
+from .instruments import DAQController, PowerSupplyController, get_daq, get_power_supply
 from .plotting import SeebeckPlotter
+from .temperature_conversion import temp_to_voltage, voltage_to_temp
 
 
 class SeebeckMeasurement:

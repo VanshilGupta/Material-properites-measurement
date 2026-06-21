@@ -1,0 +1,9 @@
+22-03-2026 17:32:48 | INFO     | --- Temperature sweep started ---
+22-03-2026 17:32:48 | INFO     | Sample: test-vg-sample
+22-03-2026 17:32:48 | INFO     | Output: c:\Personal\Titas sir\ONS\Seeback-sigma-measurement-app\data\test-vg-sample
+22-03-2026 17:32:48 | INFO     | Starting single sigma measurement
+22-03-2026 17:32:48 | INFO     | Current Temperature: 25.0°C
+22-03-2026 17:32:48 | INFO     | Thickness: 2.1 mm, Diameter: 15.0 mm
+22-03-2026 17:35:32 | WARNING  | Measurement interrupted by user
+22-03-2026 17:35:32 | ERROR    | --- Measurement FAILED: User interrupted ---
+22-03-2026 17:35:32 | INFO     | End: 22-03-2026 17:35:32

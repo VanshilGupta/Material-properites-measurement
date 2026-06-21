@@ -1,18 +1,16 @@
-"""Shared Constants for Both Seebeck and Sigma Measurements.
+"""Shared constants and a small temperature-reading helper.
 
-Instrument IDs and resource strings that are common to both measurement types.
-Each measurement type has its own specific constants in their respective files:
-- Sigma-specific: This file (constants.py)
-- Seebeck-specific: seebeck_measurement/config.py
+Holds VISA resource strings, Eurotherm serial settings, sample defaults,
+and the parameters used by ``measure_sigma.py``.  Seebeck-specific
+parameters live in ``seebeck_measurement/config.py``.
 
 Remote Mode
 -----------
-Set REMOTE_MODE = True when running the GUI on *your PC* while the
-instruments are physically connected to the *lab PC*.
-
-The lab PC must be running ``instrument_server.py``.
-Point INSTRUMENT_SERVER_HOST at its LAN IP (or "localhost" for testing).
-Set INSTRUMENT_SERVER_TOKEN to the same value as on the server.
+Set ``REMOTE_MODE = True`` to run the GUI on a separate PC while the
+instruments stay on the lab PC.  The lab PC must be running
+``instrument_server.py``.  Point ``INSTRUMENT_SERVER_HOST`` at its LAN IP
+(or ``"localhost"`` for testing) and set ``INSTRUMENT_SERVER_TOKEN`` to
+the same value used by the server.
 """
 
 # ============================================================================
@@ -20,16 +18,16 @@ Set INSTRUMENT_SERVER_TOKEN to the same value as on the server.
 # ============================================================================
 
 # Set True on your PC when instruments live on a remote lab PC.
-REMOTE_MODE = False
+REMOTE_MODE = True
 
 # IP address (or hostname) of the lab PC running instrument_server.py.
-INSTRUMENT_SERVER_HOST = "192.168.1.100"
+INSTRUMENT_SERVER_HOST = "100.109.129.26"
 
 # Port the instrument server listens on.
 INSTRUMENT_SERVER_PORT = 8765
 
 # Shared secret token — must match instrument_server.py on the lab PC.
-INSTRUMENT_SERVER_TOKEN = "seebeck-lab-token-change-me"
+INSTRUMENT_SERVER_TOKEN = "vg@123"
 
 # ============================================================================
 # Instrument Resource Strings (VISA Addresses)
@@ -109,37 +107,48 @@ DAQ_VOLTAGE_RANGE = 1.0
 # Shared Helpers
 # ============================================================================
 
-def read_current_temperature() -> float:
-    """
-    Read the current temperature from the DAQ thermocouple channel.
+_FALLBACK_TEMPERATURE_C = 25.0
 
-    In REMOTE_MODE the request is forwarded to the instrument server
-    running on the lab PC.  In local mode the DAQ is queried directly
-    via pyvisa.
+
+def read_current_temperature() -> float:
+    """Read the current furnace temperature from the DAQ's type-K thermocouple.
+
+    Local mode: opens the DAQ via pyvisa, configures channel 111 as a
+    type-K thermocouple, and queries one reading.
+
+    Remote mode: forwards the request to ``instrument_server.py`` over
+    HTTP.
 
     Returns:
-        Temperature in °C (defaults to 25.0 if reading fails).
+        Temperature in °C — falls back to 25.0 if anything goes wrong.
+        The fallback exists so GUI code that always wants a number can
+        keep working when the hardware is offline.
     """
     if REMOTE_MODE:
         try:
             import requests
             url = f"http://{INSTRUMENT_SERVER_HOST}:{INSTRUMENT_SERVER_PORT}/temperature"
-            resp = requests.get(url, headers={"X-Token": INSTRUMENT_SERVER_TOKEN}, timeout=10)
+            resp = requests.get(
+                url,
+                headers={"X-Token": INSTRUMENT_SERVER_TOKEN},
+                timeout=10,
+            )
             resp.raise_for_status()
             return float(resp.json()["temperature"])
         except Exception:
-            return 25.0
-    else:
+            return _FALLBACK_TEMPERATURE_C
+
+    try:
+        import pyvisa
+        rm = pyvisa.ResourceManager()
+        daq = rm.open_resource(DAQ_RESOURCE)
         try:
-            import pyvisa
-            rm = pyvisa.ResourceManager()
-            daq = rm.open_resource(DAQ_RESOURCE)
             daq.write('ROUT:SCAN (@111)')
             daq.write('SENS:FUNC "TEMP", (@111)')
             daq.write('SENS:TEMP:TRAN TC')
             daq.write('SENS:TEMP:TYPE K')
-            temp = float(daq.query('READ?').strip())
+            return float(daq.query('READ?').strip())
+        finally:
             daq.close()
-            return temp
-        except Exception:
-            return 25.0
+    except Exception:
+        return _FALLBACK_TEMPERATURE_C

@@ -1,0 +1,36 @@
+22-03-2026 17:32:48 | INFO     | --- Measurement at 25.0°C ---
+22-03-2026 17:32:48 | INFO     | Started: 22-03-2026 17:32:48
+22-03-2026 17:32:48 | INFO     | Starting sigma measurement...
+22-03-2026 17:32:48 | INFO     | Starting sigma measurement with thickness=2.1mm, diameter=15.0mm
+22-03-2026 17:32:51 | INFO     | ResourceManager initialized (Remote (HTTP proxy))
+22-03-2026 17:32:51 | DEBUG    | Available resources: ('USB0::0x05E6::0x6510::04619482::0::INSTR', 'USB0::0x05E6::0x2230::805224014787570003::0::INSTR')
+22-03-2026 17:32:56 | INFO     | Connected to DAQ: USB0::0x05E6::0x6510::04619482::0::INSTR
+22-03-2026 17:32:56 | INFO     | Connected to Power Supply: USB0::0x05E6::0x2230::805224014787570003::0::INSTR
+22-03-2026 17:33:06 | INFO     | Van der Pauw iteration 1/5 starting
+22-03-2026 17:33:16 | INFO     |   V1 = -0.000722 V
+22-03-2026 17:33:25 | INFO     |   V2 = 0.000698 V
+22-03-2026 17:33:35 | INFO     |   V3 = 0.000771 V
+22-03-2026 17:33:45 | INFO     |   V4 = -0.000718 V
+22-03-2026 17:33:45 | INFO     |   Voltages: V1=-0.000722346, V2=0.0006981853, V3=0.0007713913, V4=-0.0007183858
+22-03-2026 17:33:45 | INFO     |   ΔV1=0.000710 V, ΔV2=0.000745 V  →  R1=0.007097 Ω, R2=0.007443 Ω
+22-03-2026 17:33:45 | INFO     |   Iteration 1 result: σ = 144.55 S/cm
+22-03-2026 17:33:45 | INFO     | Van der Pauw iteration 2/5 starting
+22-03-2026 17:33:54 | INFO     |   V1 = -0.000734 V
+22-03-2026 17:34:03 | INFO     |   V2 = 0.000691 V
+22-03-2026 17:34:13 | INFO     |   V3 = 0.000783 V
+22-03-2026 17:34:22 | INFO     |   V4 = -0.000711 V
+22-03-2026 17:34:22 | INFO     |   Voltages: V1=-0.0007339544, V2=0.000690891, V3=0.0007832589, V4=-0.0007109756
+22-03-2026 17:34:22 | INFO     |   ΔV1=0.000712 V, ΔV2=0.000747 V  →  R1=0.007118 Ω, R2=0.007465 Ω
+22-03-2026 17:34:22 | INFO     |   Iteration 2 result: σ = 144.12 S/cm
+22-03-2026 17:34:22 | INFO     | Van der Pauw iteration 3/5 starting
+22-03-2026 17:34:31 | INFO     |   V1 = -0.000736 V
+22-03-2026 17:34:44 | INFO     |   V2 = 0.000689 V
+22-03-2026 17:35:10 | INFO     |   V3 = 0.000764 V
+22-03-2026 17:35:21 | INFO     |   V4 = -0.000722 V
+22-03-2026 17:35:21 | INFO     |   Voltages: V1=-0.0007362609, V2=0.0006892973, V3=0.000763712, V4=-0.0007216953
+22-03-2026 17:35:21 | INFO     |   ΔV1=0.000713 V, ΔV2=0.000743 V  →  R1=0.007122 Ω, R2=0.007421 Ω
+22-03-2026 17:35:21 | INFO     |   Iteration 3 result: σ = 144.51 S/cm
+22-03-2026 17:35:21 | INFO     | Van der Pauw iteration 4/5 starting
+22-03-2026 17:35:31 | INFO     |   V1 = -0.000733 V
+22-03-2026 17:35:32 | ERROR    | --- Measurement FAILED: User interrupted ---
+22-03-2026 17:35:32 | INFO     | End: 22-03-2026 17:35:32

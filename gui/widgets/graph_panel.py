@@ -25,6 +25,13 @@ _CURVE_COLORS = [
 ]
 
 
+class TwoDecimalAxis(pg.AxisItem):
+    """Custom axis that formats tick values to two decimal places."""
+
+    def tickStrings(self, values, scale, spacing):
+        return [f"{v:.2f}" for v in values]
+
+
 class GraphPanel(QWidget):
     """A titled graph panel with an optional maximize button.
 
@@ -69,7 +76,9 @@ class GraphPanel(QWidget):
         root.setSpacing(0)
 
         root.addWidget(self._build_header())
-        root.addWidget(self._build_plot(), stretch=1)
+        self._plot_widget = self._build_plot()
+        root.addWidget(self._plot_widget, stretch=1)
+        self._collapsed = False
 
     def _build_header(self) -> QWidget:
         header = QWidget()
@@ -83,30 +92,52 @@ class GraphPanel(QWidget):
         title_lbl = QLabel(self._title)
         title_lbl.setObjectName("SectionLabel")
 
-        # Export button — save as PNG
-        self._save_png_btn = QPushButton("\U0001F4E5")  # 📥
-        self._save_png_btn.setObjectName("IconButton")
-        self._save_png_btn.setToolTip("Save graph as PNG")
-        self._save_png_btn.setCursor(Qt.PointingHandCursor)
-        self._save_png_btn.setFixedSize(26, 22)
-        self._save_png_btn.clicked.connect(self._export_png)
+        # ── Download PNG button ───────────────────────────────────────
+        self._download_btn = QPushButton("\u2913")          # ⤓
+        self._download_btn.setObjectName("IconButton")
+        self._download_btn.setToolTip("Save graph as PNG")
+        self._download_btn.setCursor(Qt.PointingHandCursor)
+        self._download_btn.clicked.connect(self._on_download)
 
-        self._max_btn = QPushButton("\u26f6")
+        # ── Reset zoom button ─────────────────────────────────────────
+        self._reset_btn = QPushButton("\u21ba")             # ↺
+        self._reset_btn.setObjectName("IconButton")
+        self._reset_btn.setToolTip("Reset view / auto-range")
+        self._reset_btn.setCursor(Qt.PointingHandCursor)
+        self._reset_btn.clicked.connect(lambda: self._plot.autoRange())
+
+        # ── Maximize button ───────────────────────────────────────────
+        self._max_btn = QPushButton("\u26f6")               # ⛶
         self._max_btn.setObjectName("IconButton")
         self._max_btn.setToolTip("Maximize this graph")
         self._max_btn.setCursor(Qt.PointingHandCursor)
         self._max_btn.clicked.connect(self.maximize_requested)
 
+        # ── Collapse / expand button ─────────────────────────────────
+        self._collapse_btn = QPushButton("\u25be")           # ▾
+        self._collapse_btn.setObjectName("IconButton")
+        self._collapse_btn.setToolTip("Collapse / expand graph")
+        self._collapse_btn.setCursor(Qt.PointingHandCursor)
+        self._collapse_btn.clicked.connect(self._toggle_collapse)
+
         hl.addWidget(title_lbl)
         hl.addStretch()
-        hl.addWidget(self._save_png_btn)
+        hl.addWidget(self._download_btn)
+        hl.addWidget(self._reset_btn)
         hl.addWidget(self._max_btn)
+        hl.addWidget(self._collapse_btn)
 
         return header
 
     def _build_plot(self) -> pg.PlotWidget:
-        self._plot = pg.PlotWidget()
+        self._plot = pg.PlotWidget(
+            axisItems={
+                "bottom": TwoDecimalAxis(orientation="bottom"),
+                "left": TwoDecimalAxis(orientation="left")
+            }
+        )
         self._plot.setBackground(BG_PRIMARY)
+        self._plot.setMenuEnabled(False)    # disable built-in right-click Export menu
 
         # Axes — bold white labels for readability on dark background
         x_axis = self._plot.getAxis("bottom")
@@ -181,6 +212,7 @@ class GraphPanel(QWidget):
                                           symbolPen="w")
 
         self._ref_lines: list[pg.InfiniteLine] = []
+        self._text_items: list[pg.TextItem] = []
 
         return self._plot
 
@@ -231,6 +263,17 @@ class GraphPanel(QWidget):
         for c in self._named_curves.values():
             c.setData([], [])
         self.clear_reference_lines()
+        for t in self._text_items:
+            self._plot.removeItem(t)
+        self._text_items.clear()
+
+    def add_text(self, x: float, y: float, text: str, color: str = "#FFFFFF") -> pg.TextItem:
+        """Add a text annotation at the given data coordinates."""
+        t = pg.TextItem(text, color=color, anchor=(0, 1))
+        t.setPos(x, y)
+        self._plot.addItem(t)
+        self._text_items.append(t)
+        return t
 
     # ── Internals ─────────────────────────────────────────────────────────
 
@@ -302,23 +345,48 @@ class GraphPanel(QWidget):
 
     # ── Export helpers ─────────────────────────────────────────────────────
 
-    def _export_png(self):
-        """Save the current plot as a PNG file."""
+    # ── Header button handlers ─────────────────────────────────────────
+
+    def _on_download(self):
+        """Prompt the user for a file path and save a clean PNG."""
         path, _ = QFileDialog.getSaveFileName(
-            self, "Save Graph as PNG",
-            f"{self._title.replace(' ', '_')}.png",
-            "PNG Images (*.png);;All Files (*)",
+            self, "Save Graph", self._title.replace(" ", "_") + ".png",
+            "PNG Images (*.png)",
         )
         if path:
-            try:
-                import pyqtgraph.exporters
-                exporter = pyqtgraph.exporters.ImageExporter(
-                    self._plot.plotItem
-                )
-                exporter.parameters()['width'] = 1200
-                exporter.export(path)
-            except Exception:
-                # Fallback: grab the widget as an image
-                pixmap = self._plot.grab()
-                pixmap.save(path, "PNG")
+            self.save_clean_png(path)
+
+    def _toggle_collapse(self):
+        """Collapse or expand the plot area (header stays visible)."""
+        self._collapsed = not self._collapsed
+        self._plot_widget.setVisible(not self._collapsed)
+        self._collapse_btn.setText("\u25b8" if self._collapsed else "\u25be")
+        self._collapse_btn.setToolTip(
+            "Expand graph" if self._collapsed else "Collapse graph"
+        )
+
+    def save_clean_png(self, path: str, width: int = 1920):
+        """Save a high-resolution, clean PNG without crosshairs/tooltips."""
+        v_vis = self._vline.isVisible()
+        h_vis = self._hline.isVisible()
+        t_vis = self._tooltip.isVisible()
+        self._vline.setVisible(False)
+        self._hline.setVisible(False)
+        self._tooltip.setVisible(False)
+
+        try:
+            import pyqtgraph.exporters
+            exporter = pyqtgraph.exporters.ImageExporter(self._plot.plotItem)
+            exporter.parameters()['width'] = width
+            exporter.export(path)
+        except Exception:
+            # Fallback: grab the widget as an image
+            pixmap = self._plot.grab()
+            pixmap.save(path, "PNG")
+        finally:
+            self._vline.setVisible(v_vis)
+            self._hline.setVisible(h_vis)
+            self._tooltip.setVisible(t_vis)
+
+
 

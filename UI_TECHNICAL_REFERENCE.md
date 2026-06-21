@@ -2,7 +2,10 @@
 ## Thermoelectric Measurement System — GUI
 
 > **Audience:** Anyone who needs to make small changes to the UI without prior PySide6 knowledge.  
-> **Last updated:** Based on the state of the codebase after all Phase 1–4 refinements.
+> **Last updated:** 2026-05-20.  Reflects the post-Phase-4 GUI plus the
+> May 2026 codebase cleanup pass (no behavioural UI changes — see
+> [GUI_CONTEXT.md](GUI_CONTEXT.md) for the authoritative GUI architecture
+> reference if any detail below feels out of date).
 
 ---
 

@@ -1,42 +1,60 @@
+"""Electrical conductivity measurement using the Van der Pauw method.
+
+Drives a Keithley DAQ6510 multimeter and a Keithley 2230-30-1 power supply
+to measure 4 Van der Pauw voltage configurations, solves the transcendental
+VdP equation with scipy.optimize.brentq, and reports the geometry-corrected
+conductivity in S/cm.
+
+In REMOTE_MODE the VISA resource manager is transparently replaced with an
+HTTP proxy (see ``remote_instruments.py``) so the GUI can run on a separate
+PC from the instruments.
 """
-Electrical Conductivity Measurement using Van der Pauw Method
-Converted from MATLAB to Python
 
-Instruments:
-- Keithley DAQ6510 Multimeter
-- Keithley 2230-30-1 Power Supply
-
-Author: Converted from MATLAB
-Date: 2025-11-01
-"""
-
-import logging
-import numpy as np
-from scipy.optimize import brentq
 import time
 import traceback
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
+
+import numpy as np
+from scipy.optimize import brentq
+
 from constants import (
     DAQ_RESOURCE,
-    PS_RESOURCE,
-    DEFAULT_SAMPLE_THICKNESS,
     DEFAULT_SAMPLE_DIAMETER,
+    DEFAULT_SAMPLE_THICKNESS,
     KNOWN_RESISTOR,
-    VDP_TOLERANCE,
+    PS_RESOURCE,
     REMOTE_MODE,
 )
 
+# pyvisa is only available in local mode but VisaIOError is referenced in
+# except-clauses below.  Import it lazily and fall back to a stand-in so the
+# remote-mode code path never trips a NameError when a real exception fires.
+try:
+    import pyvisa
+    _VisaIOError = pyvisa.VisaIOError
+except ImportError:  # pragma: no cover - remote-mode environments
+    pyvisa = None  # type: ignore[assignment]
+
+    class _VisaIOError(Exception):  # type: ignore[no-redef]
+        """Placeholder when pyvisa isn't installed (remote mode)."""
+        error_code = None
+
 
 def _make_resource_manager():
-    """
-    Return either a real pyvisa.ResourceManager (local) or a
-    RemoteResourceManager (remote) depending on REMOTE_MODE.
+    """Return a resource manager appropriate for the active mode.
+
+    Local mode → real ``pyvisa.ResourceManager``.
+    Remote mode → ``RemoteResourceManager`` (HTTP proxy to the lab PC).
     """
     if REMOTE_MODE:
         from remote_instruments import RemoteResourceManager
         return RemoteResourceManager()
-    import pyvisa
+    if pyvisa is None:
+        raise RuntimeError(
+            "pyvisa is not installed but REMOTE_MODE is False. "
+            "Install pyvisa or set REMOTE_MODE=True in constants.py."
+        )
     return pyvisa.ResourceManager()
 
 
@@ -121,7 +139,7 @@ def measure_sigma(sample_t=None, sample_dia=None, verbose=True, logger=None,
         if verbose:
             print(f"  ✓ Connected to DAQ: {DAQ_RESOURCE}")
             _log('info', f"Connected to DAQ: {DAQ_RESOURCE}")
-    except pyvisa.VisaIOError as e:
+    except _VisaIOError as e:
         print(f"✗ ERROR: Cannot connect to DAQ6510 Multimeter")
         print(f"  Resource: {DAQ_RESOURCE}")
         print(f"  Error code: {e.error_code}")
@@ -141,7 +159,7 @@ def measure_sigma(sample_t=None, sample_dia=None, verbose=True, logger=None,
         if verbose:
             print(f"  ✓ Connected to Power Supply: {PS_RESOURCE}")
             _log('info', f"Connected to Power Supply: {PS_RESOURCE}")
-    except pyvisa.VisaIOError as e:
+    except _VisaIOError as e:
         print(f"✗ ERROR: Cannot connect to Power Supply")
         print(f"  Resource: {PS_RESOURCE}")
         print(f"  Error code: {e.error_code}")
@@ -172,7 +190,7 @@ def measure_sigma(sample_t=None, sample_dia=None, verbose=True, logger=None,
         if verbose:
             print("  ✓ DAQ configured for channel 103")
         
-    except pyvisa.VisaIOError as e:
+    except _VisaIOError as e:
         print(f"✗ ERROR: Failed to configure DAQ")
         print(f"  Error: {e}")
         print(f"  Solution: Check SCPI command syntax, verify channel numbers")
@@ -210,7 +228,7 @@ def measure_sigma(sample_t=None, sample_dia=None, verbose=True, logger=None,
         
         time.sleep(2)  # Wait for stabilization
         
-    except pyvisa.VisaIOError as e:
+    except _VisaIOError as e:
         print(f"✗ ERROR: Failed to configure Power Supply")
         print(f"  Error: {e}")
         print(f"  Solution: Check if power supply supports these SCPI commands")
@@ -543,10 +561,8 @@ def save_results_to_csv(results, sample_name, output_folder=None):
         
         output_folder.mkdir(parents=True, exist_ok=True)
         
-        # Create timestamp for filename (Indian format: DDMMYYYY_HHMMSS)
         timestamp = datetime.now().strftime("%d%m%Y_%H%M%S")
-        filename = f"{sample_name}_sigma_results.csv"
-        filepath = output_folder / filename
+        filepath = output_folder / f"{sample_name}_sigma_results.csv"
         
         # Prepare data
         headers = [

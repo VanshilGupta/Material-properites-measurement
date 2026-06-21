@@ -35,8 +35,10 @@ from PySide6.QtWidgets import (
     QPushButton, QLabel, QStatusBar, QMessageBox,
     QApplication, QSplitter, QScrollArea, QToolTip,
     QDialog, QFrame, QGridLayout, QStackedWidget,
+    QFileDialog,
 )
 from PySide6.QtGui import QPixmap
+from PySide6.QtCore import QSettings
 
 from gui.styles import (
     STYLESHEET, TEXT_SECONDARY, SUCCESS,
@@ -74,15 +76,16 @@ class _MeasurementConfirmDialog(QDialog):
 
     def __init__(self, m_cfg: dict, t_cfg: dict,
                  sample_name: str, diameter: float, thickness: float,
-                 current_temp: float = None, parent=None):
+                 current_temp: float = None, output_dir: str = None,
+                 parent=None):
         super().__init__(parent)
         self.setWindowTitle("Confirm Measurement")
         self.setModal(True)
         self.setMinimumWidth(400)
         self._build_ui(m_cfg, t_cfg, sample_name, diameter, thickness,
-                       current_temp)
+                       current_temp, output_dir)
 
-    def _build_ui(self, m_cfg, t_cfg, name, dia, thk, current_temp):
+    def _build_ui(self, m_cfg, t_cfg, name, dia, thk, current_temp, output_dir):
         root = QVBoxLayout(self)
         root.setContentsMargins(28, 22, 28, 20)
         root.setSpacing(0)
@@ -172,6 +175,21 @@ class _MeasurementConfirmDialog(QDialog):
             )
 
         root.addLayout(mode_col)
+        root.addSpacing(16)
+
+        # ── DATA PATH ────────────────────────────────────────────
+        root.addWidget(self._make_section_label("DATA PATH"))
+        path_col = QVBoxLayout()
+        path_col.setContentsMargins(0, 6, 0, 0)
+        path_col.setSpacing(4)
+        display_path = output_dir if output_dir else "./data/"
+        path_lbl = QLabel(f"▸  {display_path}")
+        path_lbl.setWordWrap(True)
+        path_lbl.setStyleSheet(
+            f"color: {ACCENT}; font-weight: bold; background: transparent;"
+        )
+        path_col.addWidget(path_lbl)
+        root.addLayout(path_col)
         root.addSpacing(22)
 
         # ── Divider ────────────────────────────────────────────────
@@ -412,6 +430,19 @@ class MainWindow(QMainWindow):
             "Multimeter": "idle",
         }
 
+        # Ramp state tracking
+        self._ramp_target: float | None = None
+
+        # Output folder (persisted via QSettings)
+        self._settings = QSettings("ONS", "ThermoelectricMeasurement")
+        self._output_dir: str | None = self._settings.value("output_dir", None)
+
+        # Summary data for cycle mode (Seebeck vs Temp, Sigma vs Temp)
+        # Each list stores (temp, value) tuples so they stay aligned even
+        # when one measurement type fails at a particular temperature.
+        self._summary_sigma: list[tuple[float, float]] = []
+        self._summary_seebeck: list[tuple[float, float]] = []
+
         # Build
         self._build_top_bar()
         self._build_body()
@@ -458,6 +489,17 @@ class MainWindow(QMainWindow):
         hl.addStretch()
         hl.addWidget(title)
         hl.addStretch()
+
+        # Output folder button
+        self._folder_btn = QPushButton("\U0001F4C1")
+        self._folder_btn.setObjectName("IconButton")
+        self._folder_btn.setToolTip(
+            self._output_dir or "No output folder selected (using default)"
+        )
+        self._folder_btn.setCursor(Qt.PointingHandCursor)
+        self._folder_btn.setFixedSize(34, 28)
+        self._folder_btn.clicked.connect(self._on_select_output_folder)
+        hl.addWidget(self._folder_btn)
 
         # Exit button
         exit_btn = QPushButton("Exit")
@@ -572,6 +614,30 @@ class MainWindow(QMainWindow):
         temp_val_row.addStretch()
         status_vl.addLayout(temp_val_row)
 
+        # Ramp indicator row
+        self._ramp_indicator = QLabel("")
+        self._ramp_indicator.setAlignment(Qt.AlignCenter)
+        self._ramp_indicator.setStyleSheet(
+            f"font-size: 11px; color: {ACCENT}; background: transparent;"
+        )
+        self._ramp_indicator.setVisible(False)
+        status_vl.addWidget(self._ramp_indicator)
+
+        self._stop_ramp_btn = QPushButton("\u25a0  Stop Ramp")
+        self._stop_ramp_btn.setStyleSheet(
+            f"background: {DANGER}; color: white; border-radius: 4px; "
+            "padding: 3px 12px; font-size: 11px;"
+        )
+        self._stop_ramp_btn.setCursor(Qt.PointingHandCursor)
+        self._stop_ramp_btn.setFixedHeight(24)
+        self._stop_ramp_btn.setVisible(False)
+        self._stop_ramp_btn.clicked.connect(self._on_stop_ramp)
+        ramp_btn_row = QHBoxLayout()
+        ramp_btn_row.addStretch()
+        ramp_btn_row.addWidget(self._stop_ramp_btn)
+        ramp_btn_row.addStretch()
+        status_vl.addLayout(ramp_btn_row)
+
         self.run_btn = _RunButton("\u25b6  START RUN")
         self.run_btn.setObjectName("RunButton")
         self.run_btn.setCursor(Qt.PointingHandCursor)
@@ -631,12 +697,43 @@ class MainWindow(QMainWindow):
         sigma_vl = QVBoxLayout(sigma_view)
         sigma_vl.setContentsMargins(0, 0, 0, 0)
         sigma_vl.setSpacing(0)
+
+        self.sigma_graph_splitter = QSplitter(Qt.Vertical)
+        sigma_vl.addWidget(self.sigma_graph_splitter, stretch=1)
+
         self.graph_sigma_iter = GraphPanel(
             title="Conductivity  (\u03c3 per Iteration)",
             x_label="Iteration", y_label="\u03c3",
             x_unit="", y_unit="S/cm",
+            curves=[("\u03c3", "#5B9BD5")],
         )
-        sigma_vl.addWidget(self.graph_sigma_iter)
+        # make iterations plot as dots only
+        c1 = self.graph_sigma_iter._named_curves["\u03c3"]
+        c1.setSymbol("o")
+        c1.setSymbolBrush("#5B9BD5")
+        c1.setPen(None)
+
+        self.graph_sigma_vs_temp = GraphPanel(
+            title="Conductivity vs Temperature",
+            x_label="Temperature", y_label="\u03c3",
+            x_unit="\u00b0C", y_unit="S/cm",
+            curves=[("\u03c3 vs T", "#4EC94E")],
+        )
+        c2 = self.graph_sigma_vs_temp._named_curves["\u03c3 vs T"]
+        c2.setSymbol("o")
+        c2.setSymbolBrush("#4EC94E")
+        
+        self.sigma_graph_splitter.addWidget(self.graph_sigma_iter)
+        self.sigma_graph_splitter.addWidget(self.graph_sigma_vs_temp)
+        self.sigma_graph_splitter.setStretchFactor(0, 1)
+        self.sigma_graph_splitter.setStretchFactor(1, 1)
+        
+        self.graph_sigma_iter.maximize_requested.connect(
+            lambda: self._toggle_sigma_maximize(0)
+        )
+        self.graph_sigma_vs_temp.maximize_requested.connect(
+            lambda: self._toggle_sigma_maximize(1)
+        )
         self.graph_stack.addWidget(sigma_view)  # index 1
 
         # ─── Page 2: Seebeck view ───────────────────────────────────
@@ -659,6 +756,15 @@ class MainWindow(QMainWindow):
             x_unit="min", y_unit="\u00b5V",
             curves=[("V\u2081", "#4EC94E"), ("V\u2082", "#F0A500")],
         )
+        self.graph_seebeck_vs_temp = GraphPanel(
+            title="Seebeck vs Temperature",
+            x_label="Temperature", y_label="Seebeck Coefficient",
+            x_unit="\u00b0C", y_unit="\u00b5V/K",
+            curves=[("S vs T", "#F0A500")],
+        )
+        c3 = self.graph_seebeck_vs_temp._named_curves["S vs T"]
+        c3.setSymbol("o")
+        c3.setSymbolBrush("#F0A500")
         # V₁ vs V₂ fit graph — created now, added to splitter at seebeck end
         self.graph_fit = GraphPanel(
             title="V\u2081 vs V\u2082   (Seebeck Fit)",
@@ -670,8 +776,10 @@ class MainWindow(QMainWindow):
 
         self.seebeck_graph_splitter.addWidget(self.graph_seebeck_t)
         self.seebeck_graph_splitter.addWidget(self.graph_seebeck_v)
+        self.seebeck_graph_splitter.addWidget(self.graph_seebeck_vs_temp)
         self.seebeck_graph_splitter.setStretchFactor(0, 1)
         self.seebeck_graph_splitter.setStretchFactor(1, 1)
+        self.seebeck_graph_splitter.setStretchFactor(2, 1)
 
         self.graph_seebeck_t.maximize_requested.connect(
             lambda: self._toggle_graph_maximize(0)
@@ -679,8 +787,11 @@ class MainWindow(QMainWindow):
         self.graph_seebeck_v.maximize_requested.connect(
             lambda: self._toggle_graph_maximize(1)
         )
-        self.graph_fit.maximize_requested.connect(
+        self.graph_seebeck_vs_temp.maximize_requested.connect(
             lambda: self._toggle_graph_maximize(2)
+        )
+        self.graph_fit.maximize_requested.connect(
+            lambda: self._toggle_graph_maximize(3)
         )
 
         seebeck_vl.addWidget(self.seebeck_graph_splitter, stretch=1)
@@ -800,8 +911,12 @@ class MainWindow(QMainWindow):
         self.measurement_svc.measurement_finished.connect(self._on_measurement_finished)
         self.measurement_svc.seebeck_data_point.connect(self._on_seebeck_data_point)
         self.measurement_svc.sigma_data_point.connect(self._on_sigma_data_point)
+        self.measurement_svc.sigma_completed.connect(self._on_sigma_completed)
         self.measurement_svc.seebeck_fit_ready.connect(self._on_seebeck_fit_ready)
         self.measurement_svc.phase_changed.connect(self._on_phase_changed)
+        
+        self.measurement_svc.cycle_point_starting.connect(self._on_cycle_point_starting)
+        self.measurement_svc.cycle_point_completed.connect(self._on_cycle_point_completed)
 
         # Update placeholder text when measurement checkboxes change
         self.method_panel.settings_changed.connect(self._update_graph_placeholder)
@@ -832,8 +947,10 @@ class MainWindow(QMainWindow):
             or self.method_panel.radio_heat_only.isChecked()
             or self.method_panel.radio_heat_cool.isChecked()
         )
+        # Disable RUN while temperature is ramping to a setpoint.
+        ramp_ok = self._ramp_target is None
 
-        can_run = name_ok and dia_ok and thk_ok and meas_ok and cycle_ok
+        can_run = name_ok and dia_ok and thk_ok and meas_ok and cycle_ok and ramp_ok
         self.run_btn.setEnabled(can_run)
 
         if can_run:
@@ -850,14 +967,25 @@ class MainWindow(QMainWindow):
                 reasons.append("\u2022 Select Heating Only or Heating + Cooling")
             if not meas_ok:
                 reasons.append("\u2022 Select at least one measurement (Seebeck or \u03c3)")
+            if not ramp_ok:
+                reasons.append("\u2022 Temperature ramp in progress")
             self.run_btn.setToolTip("Cannot start:\n" + "\n".join(reasons))
 
     def _update_current_temp(self, temp_c: float):
         self._last_known_temp = temp_c
         self.current_temp_lbl.setText(f"{temp_c:.1f}  \u00b0C")
-        self._temp_read_count += 1
+        # Ramp indicator auto-clear when arrived
+        if self._ramp_target is not None:
+            if abs(temp_c - self._ramp_target) <= 2.0:
+                # Arrived
+                self._ramp_indicator.setVisible(False)
+                self._stop_ramp_btn.setVisible(False)
+                self._ramp_target = None
+                self._update_run_btn_state()
+
         # Log a heartbeat every 30 successful reads (≈ every 30 s) so the
         # operator can confirm live polling without flooding the log panel.
+        self._temp_read_count += 1
         if self._temp_read_count % 30 == 1:   # also fires on the very first read
             self.log_panel.append(
                 f"[Eurotherm] T = {temp_c:.1f} \u00b0C  \u2713"
@@ -876,6 +1004,14 @@ class MainWindow(QMainWindow):
             f"Setting furnace \u2192 {target_c:.1f} \u00b0C  "
             f"@ {rate:.1f} \u00b0C/min \u2026"
         )
+        # Update Ramp UI
+        self._ramp_target = target_c
+        msg = f"\u2b06 Ramping \u2192 {target_c:.1f} \u00b0C" if target_c > getattr(self,("_last_known_temp"), 0) else f"\u2b07 Cooling \u2192 {target_c:.1f} \u00b0C"
+        self._ramp_indicator.setText(msg)
+        self._ramp_indicator.setVisible(True)
+        self._stop_ramp_btn.setVisible(True)
+        self._update_run_btn_state() # Disable RUN while ramping
+
         self.log_panel.append(
             f"Setting furnace \u2192 {target_c:.1f} \u00b0C  "
             f"(ramp {rate:.1f} \u00b0C/min)"
@@ -899,6 +1035,30 @@ class MainWindow(QMainWindow):
     def _show_error(self, msg: str):
         self.status_label.setText(f"Error: {msg}")
         self.log_panel.append(f"ERROR: {msg}")
+
+    # -- GUI Utilities -------------------------------------------------
+
+    def _on_stop_ramp(self):
+        """Halt temperature ramping by setting the setpoint to current temp."""
+        curr = getattr(self, "_last_known_temp", 25.0)
+        self._ramp_target = None
+        self._ramp_indicator.setVisible(False)
+        self._stop_ramp_btn.setVisible(False)
+        self.eurotherm.set_temperature(curr)
+        self.log_panel.append(f"Ramp stopped at {curr:.1f} \u00b0C")
+        self._update_run_btn_state()
+
+    def _on_select_output_folder(self):
+        """Prompt user for a persistent output directory."""
+        dir_path = QFileDialog.getExistingDirectory(
+            self, "Select Output Folder", 
+            self._output_dir or "",
+            QFileDialog.ShowDirsOnly
+        )
+        if dir_path:
+            self._output_dir = dir_path
+            self._settings.setValue("output_dir", dir_path)
+            self._folder_btn.setToolTip(f"Output folder: {dir_path}")
 
     # -- Run / Abort ---------------------------------------------------
 
@@ -924,6 +1084,7 @@ class MainWindow(QMainWindow):
         dlg = _MeasurementConfirmDialog(
             m_cfg, t_cfg, name, diameter, thickness,
             current_temp=getattr(self, "_last_known_temp", None),
+            output_dir=self._output_dir,
             parent=self,
         )
         if dlg.exec() != QDialog.DialogCode.Accepted:
@@ -966,7 +1127,14 @@ class MainWindow(QMainWindow):
             "measure_seebeck": m_cfg["measure_seebeck"],
             "seebeck_time":    seebeck_time,
             "gui_temperature": getattr(self, "_last_known_temp", None),
+            "base_dir":        self._output_dir,
         }
+
+        # Clear cycle summary graphs
+        self._summary_seebeck.clear()
+        self._summary_sigma.clear()
+        self.graph_sigma_vs_temp.clear_data()
+        self.graph_seebeck_vs_temp.clear_data()
 
         # Cycle mode: generate temperature list and add cycle params
         if m_cfg["cycle_mode"]:
@@ -1007,6 +1175,13 @@ class MainWindow(QMainWindow):
     def _on_measurement_finished(self, success: bool, summary: str, metadata: dict):
         """Called when the measurement worker finishes (success or abort)."""
         self._set_running(False)
+
+        # Auto-export summary if we just finished a cycle
+        if success and self.method_panel.is_cycle_mode():
+            dp = metadata.get("data_path")
+            if dp:
+                self._export_cycle_summary(dp)
+
         if success:
             self.log_panel.append(f"\u2714  {summary}")
         else:
@@ -1028,6 +1203,7 @@ class MainWindow(QMainWindow):
         self.sample_panel.setEnabled(not running)
         self.method_panel.setEnabled(not running)
         self.temp_panel.setEnabled(not running)
+        self._folder_btn.setEnabled(not running)
 
         # Clear graphs at the start of a new run so old data doesn't persist.
         if running:
@@ -1039,6 +1215,83 @@ class MainWindow(QMainWindow):
             if self._fit_graph_added:
                 self.graph_fit.setParent(None)
                 self._fit_graph_added = False
+
+    def _on_cycle_point_starting(self, idx: int, tgt_temp: float):
+        self.graph_sigma_iter.clear_data()
+        self.graph_seebeck_t.clear_data()
+        self.graph_seebeck_v.clear_data()
+        self.graph_fit.clear_data()
+        # You could also update a section title to "Cycle [X/Y] - Z °C"
+
+    def _on_cycle_point_completed(self, actual_temp: float, sigma_res: dict, seebeck_res: dict, folder_path: str = ""):
+        if sigma_res:
+            corr = sigma_res.get("corr_sigma", 0.0)
+            self._summary_sigma.append((actual_temp, corr))
+            self.graph_sigma_vs_temp.append_to("\u03c3 vs T", actual_temp, corr)
+            self.graph_sigma_vs_temp._plot.autoRange()
+            if folder_path:
+                import os
+                self.graph_sigma_iter.save_clean_png(os.path.join(folder_path, "Sigma", "sigma_iterations.png"))
+        if seebeck_res:
+            sb = seebeck_res.get("Seebeck", 0.0)
+            self._summary_seebeck.append((actual_temp, sb))
+            self.graph_seebeck_vs_temp.append_to("S vs T", actual_temp, sb)
+            self.graph_seebeck_vs_temp._plot.autoRange()
+
+    def _export_cycle_summary(self, dir_path: str):
+        import traceback, csv, os
+        try:
+            name = self.sample_panel.get_sample_name()
+            if self._summary_sigma:
+                temps = [t for t, _ in self._summary_sigma]
+                vals  = [s for _, s in self._summary_sigma]
+                csv_path = os.path.join(dir_path, f"{name}_Sigma_vs_Temp.csv")
+                with open(csv_path, "w", newline="") as f:
+                    writer = csv.writer(f)
+                    writer.writerow(["Temperature (°C)", "Conductivity (S/cm)"])
+                    for t, s in self._summary_sigma:
+                        writer.writerow([f"{t:.2f}", f"{s:.6e}"])
+                png_path = os.path.join(dir_path, f"{name}_Sigma_vs_Temp.png")
+                self._export_matplotlib_png(
+                    temps, vals, png_path,
+                    "Conductivity vs Temperature",
+                    "Temperature (\u00b0C)", "Conductivity (S/cm)", "green"
+                )
+
+            if self._summary_seebeck:
+                temps = [t for t, _ in self._summary_seebeck]
+                vals  = [s for _, s in self._summary_seebeck]
+                csv_path = os.path.join(dir_path, f"{name}_Seebeck_vs_Temp.csv")
+                with open(csv_path, "w", newline="") as f:
+                    writer = csv.writer(f)
+                    writer.writerow(["Temperature (°C)", "Seebeck Coefficient (µV/K)"])
+                    for t, s in self._summary_seebeck:
+                        writer.writerow([f"{t:.2f}", f"{s:.6f}"])
+                png_path = os.path.join(dir_path, f"{name}_Seebeck_vs_Temp.png")
+                self._export_matplotlib_png(
+                    temps, vals, png_path,
+                    "Seebeck vs Temperature",
+                    "Temperature (\u00b0C)", "Seebeck Coefficient (\u00b5V/K)", "orange"
+                )
+
+            self.log_panel.append(f"\u2714 Saved cycle summary graphs and CSVs to {dir_path}")
+        except Exception as e:
+            self.log_panel.append(f"\u26a0 Failed to export cycle summary: {e}")
+            print(traceback.format_exc())
+
+    def _export_matplotlib_png(self, x_data, y_data, path, title, xlabel, ylabel, color):
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        fig, ax = plt.subplots(figsize=(8, 5))
+        ax.plot(x_data, y_data, marker='o', linestyle='-', color=color, linewidth=2, markersize=8)
+        ax.set_title(title, fontsize=14, fontweight='bold')
+        ax.set_xlabel(xlabel, fontsize=12, fontweight='bold')
+        ax.set_ylabel(ylabel, fontsize=12, fontweight='bold')
+        ax.grid(True, alpha=0.3)
+        fig.tight_layout()
+        fig.savefig(path, dpi=200)
+        plt.close(fig)
 
     # -- Real-time Seebeck data --------------------------------------------
 
@@ -1063,14 +1316,19 @@ class MainWindow(QMainWindow):
         sigma = data.get("sigma", None)
         if sigma is not None and sigma > 0:
             self.graph_sigma_iter.append_to("\u03c3", iteration, sigma)
-            # After all 5 VDP iterations, add median reference line
-            if iteration == 5:
-                median_sigma = data.get("sigma", sigma)
-                self.graph_sigma_iter.add_horizontal_line(
-                    median_sigma,
-                    pen=pg.mkPen("#F0A500", width=1, style=Qt.DashLine),
-                    label=f"median \u03c3 = {median_sigma:.4f} S/cm",
-                )
+
+            # Show measurement label next to pointer
+            self.graph_sigma_iter.add_text(iteration, sigma, f"{sigma:.2e}", color="#5B9BD5")
+
+    def _on_sigma_completed(self, results: dict):
+        """Draw the corrected-sigma median line after σ measurement finishes."""
+        corr_sigma = results.get("corr_sigma")
+        if corr_sigma is not None and corr_sigma > 0:
+            self.graph_sigma_iter.add_horizontal_line(
+                corr_sigma,
+                pen=pg.mkPen("#F0A500", width=1, style=Qt.DashLine),
+                label=f"σ = {corr_sigma:.4e} S/cm",
+            )
 
     def _on_seebeck_fit_ready(self, data: dict):
         """Add the V₁ vs V₂ fit graph to the seebeck splitter."""
@@ -1205,6 +1463,7 @@ class MainWindow(QMainWindow):
         sizes = splitter.sizes()
         total = sum(sizes)
         count = len(sizes)
+        if count == 0: return
         # Check if all *other* panels are collapsed
         others_collapsed = all(
             s < 30 for i, s in enumerate(sizes) if i != index
@@ -1215,6 +1474,23 @@ class MainWindow(QMainWindow):
             splitter.setSizes([each] * count)
         else:
             # Maximize requested panel, collapse all others
+            new_sizes = [0] * count
+            new_sizes[index] = total
+            splitter.setSizes(new_sizes)
+
+    def _toggle_sigma_maximize(self, index: int):
+        splitter = self.sigma_graph_splitter
+        sizes = splitter.sizes()
+        total = sum(sizes)
+        count = len(sizes)
+        if count == 0: return
+        others_collapsed = all(
+            s < 30 for i, s in enumerate(sizes) if i != index
+        )
+        if others_collapsed:
+            each = total // count
+            splitter.setSizes([each] * count)
+        else:
             new_sizes = [0] * count
             new_sizes[index] = total
             splitter.setSizes(new_sizes)

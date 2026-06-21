@@ -1,11 +1,8 @@
 """Real-time plotting for Seebeck measurements."""
 
-import matplotlib.pyplot as plt
-from matplotlib.animation import FuncAnimation
-import numpy as np
-from typing import Optional
-import time
 from pathlib import Path
+
+import matplotlib.pyplot as plt
 
 
 class SeebeckPlotter:
@@ -89,18 +86,14 @@ class SeebeckPlotter:
         plt.pause(0.001)
     
     def save_plot(self, filename: str, output_folder: str = None):
-        """
-        Save the current plot to file.
-        
+        """Save the current real-time plot as a PNG.
+
         Args:
-            filename: Base filename (without extension)
-            output_folder: Output directory (the sample folder where all data goes)
+            filename: Base filename (without extension).
+            output_folder: Output directory (the sample folder).  If None,
+                falls back to a ``seebeck_data/plots/`` folder next to the
+                source files (legacy behaviour).
         """
-        
-        
-        # Hold the final plot for 5 seconds before saving and closing
-        time.sleep(5)
-        
         if output_folder is None:
             # Default to seebeck_data/plots/ folder next to the code files (legacy behavior)
             code_dir = Path(__file__).parent.parent

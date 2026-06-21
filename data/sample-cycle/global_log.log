@@ -1,0 +1,10 @@
+15-03-2026 14:14:34 | INFO     | --- Temperature sweep started ---
+15-03-2026 14:14:34 | INFO     | Sample: sample-cycle
+15-03-2026 14:14:34 | INFO     | Output: c:\Personal\Titas sir\ONS\Seeback-sigma-measurement-app\data\sample-cycle
+15-03-2026 14:14:34 | INFO     | Temperature sweep: [30.0, 35.0, 40.0, 45.0, 50.0]
+15-03-2026 14:14:34 | INFO     | Ramp rate: 10.0°C/min
+15-03-2026 14:14:34 | INFO     | Sample: 2.1mm thick, 15.0mm diameter
+15-03-2026 14:14:34 | ERROR    | Failed to connect to COM5: could not open port 'COM5': FileNotFoundError(2, 'The system cannot find the file specified.', None, 2)
+15-03-2026 14:14:34 | ERROR    | Failed to connect to Eurotherm!
+15-03-2026 14:14:34 | ERROR    | --- Measurement FAILED: Eurotherm connection failed ---
+15-03-2026 14:14:34 | INFO     | End: 15-03-2026 14:14:34

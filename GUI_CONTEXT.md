@@ -4,11 +4,18 @@
 > the GUI.  Feed this file at the start of a new chat session so the
 > assistant knows exactly what exists, what works, and what remains.
 >
-> **Last updated**: 2026-03-02 — After implementing 6 new features:
-> enhanced summary/confirm dialogs (temperature, path, timing metadata),
-> graph tooltip showing all curves, per-iteration sigma CSV, real-time sigma
-> graph with dynamic right panel (QStackedWidget), V₁ vs V₂ fit graph for
-> Seebeck, and testing mode with adjustable Seebeck time.
+> **Last updated**: 2026-05-20 — Codebase-wide cleanup pass:
+> fixed latent `pyvisa.VisaIOError` NameError in `measure_sigma.py`,
+> removed blocking 5 s sleep in `SeebeckPlotter.save_plot`, cleaned
+> unused imports and stale aliases, polished docstrings.  No GUI-layer
+> behaviour changes.
+>
+> **Previous (2026-03-03)**: Bug-fix and feature session:
+> fixed sigma median line (uses `sigma_completed` signal with corrected σ),
+> fixed summary data alignment (tuple-based storage), wired dead plot-saving
+> methods (`_save_sigma_iteration_plot`, `_save_seebeck_fit_plot`),
+> added graph Download/Reset/Collapse buttons, disabled pyqtgraph right-click
+> menu, added DATA PATH section to confirm dialog, added graph collapse/expand.
 
 ---
 
@@ -202,6 +209,8 @@ all signal wiring.
 | `v_splitter`               | `QSplitter`              | Body/log split                              |
 | `_left_collapsed`          | `bool`                   | Collapse state tracking                     |
 | `_measurement_running`     | `bool`                   | Run state tracking                          |
+| `_summary_sigma`           | `list[tuple[float,float]]`| Cycle mode: (temp, σ) pairs                |
+| `_summary_seebeck`         | `list[tuple[float,float]]`| Cycle mode: (temp, S) pairs                |
 
 #### Inner classes
 
@@ -211,8 +220,9 @@ button is greyed out.
 
 **`_MeasurementConfirmDialog`** — Modal confirmation dialog shown before
 starting a run.  Displays sample name, diameter, thickness, selected
-measurements, and **current temperature** (or cycle temperature points).
-Accepts optional `current_temp` parameter.
+measurements, **current temperature** (or cycle temperature points),
+mode details, and **DATA PATH** section showing output directory.
+Accepts optional `current_temp` and `output_dir` parameters.
 "Cancel" and "Start Run" buttons both have `Qt.PointingHandCursor`.
 
 **`_MeasurementSummaryDialog`** — Modal summary dialog shown when a
@@ -240,6 +250,7 @@ measurement_svc.instrument_status    → _on_instrument_status
 measurement_svc.measurement_finished → _on_measurement_finished
 measurement_svc.seebeck_data_point   → _on_seebeck_data_point
 measurement_svc.sigma_data_point     → _on_sigma_data_point
+measurement_svc.sigma_completed      → _on_sigma_completed
 measurement_svc.seebeck_fit_ready    → _on_seebeck_fit_ready
 measurement_svc.phase_changed        → _on_phase_changed
 method_panel.settings_changed        → _update_graph_placeholder
@@ -263,7 +274,8 @@ method_panel.settings_changed        → _update_graph_placeholder
 | `_refresh_instrument_dot`   | Sets dot colour: grey (disconnected), green (idle), blue (active)            |
 | `_set_running`              | Toggles RUN/ABORT, locks/unlocks panels, clears all 4 graphs, removes fit graph from splitter if added |
 | `_on_seebeck_data_point`    | Converts time→minutes, V→µV; feeds `graph_seebeck_t` and `graph_seebeck_v`  |
-| `_on_sigma_data_point`      | Appends σ to `graph_sigma_iter`; adds median reference line after iteration 5 |
+| `_on_sigma_data_point`      | Appends σ to `graph_sigma_iter`; adds per-point text label                   |
+| `_on_sigma_completed`       | Draws corrected σ median line on `graph_sigma_iter` via `sigma_completed`    |
 | `_on_seebeck_fit_ready`     | Plots V₁ vs V₂ scatter + fit line on `graph_fit`; adds graph to seebeck splitter |
 | `_on_phase_changed`         | Switches `graph_stack` page: "sigma"→1, "seebeck"→2, "idle"→stay           |
 | `_update_graph_placeholder` | Updates placeholder label text based on checkbox selection                    |
@@ -554,11 +566,12 @@ Constructor: `GraphPanel(title, x_label, y_label, x_unit, y_unit, *, curves=None
 - `curves`: optional `list[tuple[str, str]]` — `[(name, hex_colour), …]`
   If provided, multi-curve mode is activated with a legend.
   If omitted, single-curve mode (backward-compatible).
-- Header (32 px): title + ⛶ maximize button
-- Plot: dark background (`BG_PRIMARY`), grid
+- Header (32 px): title + ⇓ download + ↺ reset + ⛶ maximize + ▾ collapse buttons
+- Plot: dark background (`BG_PRIMARY`), grid, **right-click menu disabled**
 - All 4 axes shown; top/right have no ticks (frame only)
 - `_CURVE_COLORS` default palette defined for auto-colouring
 - Crosshair tooltip shows **all curves' values** at the hovered x position
+- Collapse/expand (▾/▸): hides the plot area, keeps header visible
 
 | Signal                | When                    |
 | --------------------- | ----------------------- |
@@ -573,6 +586,9 @@ Constructor: `GraphPanel(title, x_label, y_label, x_unit, y_unit, *, curves=None
 | `clear_data()`                      | Clears all curves + reference lines                       |
 | `add_horizontal_line(y, pen, label)`| Adds a labelled InfiniteLine; tracked in `_ref_lines`     |
 | `clear_reference_lines()`           | Removes all reference lines from the plot                 |
+| `save_clean_png(path, width=1920)`  | Saves high-res PNG without crosshairs                     |
+| `_on_download()`                    | Prompts user for path, calls `save_clean_png`             |
+| `_toggle_collapse()`                | Hides/shows plot area (header stays visible)              |
 
 Instances in MainWindow:
 - `graph_sigma_iter`: "Conductivity (σ per Iteration)" — single curve
@@ -637,14 +653,23 @@ then restore `maximumBlockCount = 2000`.
 | **Pointer cursors on dialog buttons**| ✅     | All dialog buttons (`Cancel`, `Start Run`, `OK`) use `PointingHandCursor` |
 | **Status bar redesign**              | ✅     | 12 px dots, 20 px spacing, no separators, 2 px dot-label gap          |
 | **Real-time Seebeck graphs**         | ✅     | T₁/T₂ vs Time and V₁/V₂ vs Time, fed by `seebeck_data_point` signal  |
-| **Real-time σ iteration graph**      | ✅     | σ per iteration bar chart, median reference line after 5 iterations    |
+| **Real-time σ iteration graph**      | ✅     | σ per iteration with per-point labels, corrected σ median line via `sigma_completed` |
 | **Dynamic right panel (QStackedWidget)** | ✅ | Placeholder → σ graph → Seebeck view, switched by `phase_changed`     |
 | **V₁ vs V₂ Seebeck fit graph**      | ✅     | Scatter + linear fit, added to Seebeck splitter on `seebeck_fit_ready` |
 | **Per-iteration σ CSV**              | ✅     | CSV with V1–V4, ΔV, R, σ per iteration via `save_iteration_data_to_csv` |
 | **Graph tooltip all curves**         | ✅     | Tooltip shows ALL curves' values at hovered x position                 |
 | **Testing mode**                     | ✅     | Checkbox + adjustable Seebeck time (1–60 min), hidden by default       |
 | **Confirm dialog with temperature**  | ✅     | Shows current temp or cycle points before starting run                 |
+| **Confirm dialog DATA PATH**        | ✅     | Shows output directory in confirm dialog; defaults to `./data/`        |
 | **Summary dialog with metadata**     | ✅     | Shows temperature, σ time, Seebeck time, total time, data path         |
+| **Graph Download button (⇓)**       | ✅     | Each graph header has download button → save clean PNG via dialog      |
+| **Graph Reset View button (↺)**     | ✅     | Each graph header has reset button → auto-range                        |
+| **Graph Collapse/Expand (▾/▸)**     | ✅     | Each graph header has collapse button → hides plot, keeps header       |
+| **pyqtgraph right-click disabled**   | ✅     | `setMenuEnabled(False)` on all graph PlotWidgets                       |
+| **Sigma plot saved (matplotlib)**    | ✅     | `_save_sigma_iteration_plot()` called after σ measurement in both paths |
+| **Seebeck fit plot saved**           | ✅     | `_save_seebeck_fit_plot()` called after seebeck in both paths          |
+| **Summary data tuple alignment**     | ✅     | `_summary_sigma` and `_summary_seebeck` use `(temp, value)` tuples     |
+| **sigma_completed signal wired**     | ✅     | Connected in `_connect_backend` → `_on_sigma_completed` draws median   |
 
 ---
 
@@ -898,7 +923,32 @@ measurement_svc.seebeck_data_point.connect(self._on_seebeck_data_point)
 
 ---
 
-## 14. Latest Changes (most recent session — 2026-03-02)
+## 14. Latest Changes (most recent session — 2026-03-03)
+
+Bug-fix and quality session.  Files changed:
+
+### 1. `gui/widgets/graph_panel.py` — new header buttons + collapse
+- **Right-click disabled**: `self._plot.setMenuEnabled(False)` removes built-in pyqtgraph Export menu.
+- **Download button (⇓)**: opens `QFileDialog` → saves clean PNG via `save_clean_png()`.
+- **Reset View button (↺)**: calls `self._plot.autoRange()`.
+- **Collapse/Expand button (▾/▸)**: `_toggle_collapse()` hides/shows the plot widget; header stays visible.
+- `_build_ui()` stores plot widget as `self._plot_widget` for collapse toggling.
+
+### 2. `gui/main_window.py` — median line fix + data alignment + confirm dialog
+- **Sigma median line fix**: Removed broken `iteration == 5` median code from `_on_sigma_data_point()`. Added `_on_sigma_completed(results)` that uses `corr_sigma` from `sigma_completed` signal to draw the correct geometry-corrected median line.
+- **`sigma_completed` signal wired**: Connected in `_connect_backend()` → `_on_sigma_completed`.
+- **Summary data alignment**: Replaced 3 parallel lists (`_summary_temps`, `_summary_sigma`, `_summary_seebeck`) with 2 independent tuple lists: `_summary_sigma: list[tuple[float, float]]` and `_summary_seebeck: list[tuple[float, float]]`. Eliminates misalignment when measurements differ per temperature point.
+- **`_on_cycle_point_completed`**: Updated to append `(temp, value)` tuples.
+- **`_export_cycle_summary`**: Updated to unpack tuples instead of `zip()`.
+- **Confirm dialog DATA PATH**: `_MeasurementConfirmDialog` now accepts `output_dir` parameter and displays it as a "DATA PATH" section (defaults to `./data/`).
+
+### 3. `gui/backend/measurement_service.py` — plot saving calls
+- **`_save_sigma_iteration_plot()`**: Now called after σ measurement in both single-temp and cycle paths (was dead code).
+- **`_save_seebeck_fit_plot()`**: Now called after Seebeck `_save_seebeck_time_series_plots()` in both paths (was dead code). All 3 Seebeck plots are now saved (time-series T, time-series V, and fit).
+
+---
+
+## 15. Previous Session Changes (2026-03-02)
 
 6 feature requests implemented.  Files changed:
 

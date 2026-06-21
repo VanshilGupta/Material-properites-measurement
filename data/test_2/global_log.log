@@ -1,0 +1,6 @@
+01-03-2026 16:46:00 | INFO     | --- Temperature sweep started ---
+01-03-2026 16:46:00 | INFO     | Sample: test
+01-03-2026 16:46:00 | INFO     | Output: C:\Personal\Titas sir\ONS\Seeback-sigma-measurement-app\data\test_2
+01-03-2026 16:46:00 | INFO     | Starting measurement — test (2.0 mm × 10.0 mm) at -0.0 °C
+01-03-2026 16:47:17 | ERROR    | --- Measurement FAILED: User aborted ---
+01-03-2026 16:47:17 | INFO     | End: 01-03-2026 16:47:17

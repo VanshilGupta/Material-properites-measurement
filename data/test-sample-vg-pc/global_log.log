@@ -1,0 +1,22 @@
+22-03-2026 19:37:20 | INFO     | --- Temperature sweep started ---
+22-03-2026 19:37:20 | INFO     | Sample: test-sample-vg-pc
+22-03-2026 19:37:20 | INFO     | Output: C:\Personal\Titas sir\ONS\Seeback-sigma-measurement-app\data\test-sample-vg-pc
+22-03-2026 19:37:20 | INFO     | Cycle: [40.0, 42.0, 44.0], rate=10.0, wait=60.0s
+22-03-2026 19:37:20 | ERROR    | Failed to connect to COM5: could not open port 'COM5': FileNotFoundError(2, 'The system cannot find the file specified.', None, 2)
+22-03-2026 19:37:20 | INFO     | [1/3] Target: 40.0°C
+22-03-2026 19:38:21 | INFO     | Actual temp: 40.0°C
+22-03-2026 19:41:38 | INFO     | SIGMA completed: -2.38e+02 S/cm
+22-03-2026 19:42:48 | INFO     | SEEBECK completed: -179.79 µV/K
+22-03-2026 19:42:48 | INFO     | [1/3] Done: σ=-2.38e+02, S=-179.79 µV/K
+22-03-2026 19:42:48 | INFO     | [2/3] Target: 42.0°C
+22-03-2026 19:43:48 | INFO     | Actual temp: 42.0°C
+22-03-2026 19:47:16 | INFO     | SIGMA completed: -2.39e+02 S/cm
+22-03-2026 19:48:28 | INFO     | SEEBECK completed: -178.90 µV/K
+22-03-2026 19:48:28 | INFO     | [2/3] Done: σ=-2.39e+02, S=-178.90 µV/K
+22-03-2026 19:48:28 | INFO     | [3/3] Target: 44.0°C
+22-03-2026 19:49:29 | INFO     | Actual temp: 44.0°C
+22-03-2026 19:52:56 | INFO     | SIGMA completed: -2.39e+02 S/cm
+22-03-2026 19:54:08 | INFO     | SEEBECK completed: -180.12 µV/K
+22-03-2026 19:54:08 | INFO     | [3/3] Done: σ=-2.39e+02, S=-180.12 µV/K
+22-03-2026 19:54:08 | INFO     | --- Measurement completed successfully ---
+22-03-2026 19:54:08 | INFO     | End: 22-03-2026 19:54:08

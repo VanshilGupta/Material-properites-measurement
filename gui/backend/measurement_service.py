@@ -105,7 +105,7 @@ class _MeasurementWorker(QObject):
     
     # Cycle mode hooks
     cycle_point_starting = Signal(int, float)             # (index, target_temp)
-    cycle_point_completed = Signal(float, object, object) # (actual_temp, sigma_res, seebeck_res)
+    cycle_point_completed = Signal(float, object, object, str) # (actual_temp, sigma_res, seebeck_res, temp_folder)
     measurement_finished = Signal(bool, str, dict)  # (success, summary, metadata)
 
     def __init__(self):
@@ -420,6 +420,117 @@ class _MeasurementWorker(QObject):
         except Exception as exc:
             self._log(f"Warning: could not save time-series plots: {exc}")
 
+    # ── Sigma iteration plot saving ──────────────────────────────────────
+
+    def _save_sigma_iteration_plot(self, sigma_folder: Path,
+                                    filename: str, results: dict):
+        """Save a clean matplotlib plot of σ per iteration with median line."""
+        try:
+            import matplotlib
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+            import numpy as np
+
+            sigma_raw = results.get("sigma_raw")
+            if sigma_raw is None:
+                return
+            sigma_raw = np.asarray(sigma_raw)
+            iterations = np.arange(1, len(sigma_raw) + 1)
+            valid_mask = sigma_raw > 0
+            median_sigma = float(np.median(sigma_raw[valid_mask])) if valid_mask.any() else 0.0
+
+            fig, ax = plt.subplots(figsize=(12, 7))
+            ax.scatter(iterations, sigma_raw, s=100, c="#5B9BD5", zorder=5,
+                       edgecolors="white", linewidths=1.2, label="σ per iteration")
+
+            # Annotate each point with its value
+            for i, s in zip(iterations, sigma_raw):
+                if s > 0:
+                    ax.annotate(f"{s:.2e}", (i, s), textcoords="offset points",
+                                xytext=(8, 10), fontsize=9, color="#5B9BD5",
+                                fontweight="bold")
+
+            # Median reference line
+            if median_sigma > 0:
+                ax.axhline(median_sigma, color="#F0A500", linestyle="--",
+                           linewidth=1.5,
+                           label=f"Median σ = {median_sigma:.4e} S/cm")
+
+            ax.set_xlabel("Iteration", fontsize=12, fontweight="bold")
+            ax.set_ylabel("σ (S/cm)", fontsize=12, fontweight="bold")
+            ax.set_title(f"{filename} — Conductivity per Iteration",
+                         fontsize=14, fontweight="bold")
+            ax.set_xticks(iterations)
+            ax.legend(fontsize=11, loc="best")
+            ax.grid(True, alpha=0.3)
+            fig.tight_layout()
+
+            plots_dir = sigma_folder
+            plots_dir.mkdir(parents=True, exist_ok=True)
+            fig.savefig(plots_dir / f"{filename}_sigma_iterations.png",
+                        dpi=200, bbox_inches="tight")
+            plt.close(fig)
+            self._log("Saved sigma iteration plot")
+        except Exception as exc:
+            self._log(f"Warning: could not save sigma iteration plot: {exc}")
+
+    # ── Seebeck V₁ vs V₂ fit plot saving ─────────────────────────────────
+
+    def _save_seebeck_fit_plot(self, seebeck_folder: Path,
+                                filename: str, results: dict):
+        """Save V1 vs V2 scatter + fit line via matplotlib."""
+        try:
+            import matplotlib
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+            import numpy as np
+
+            data_avg = results.get("data_avg")
+            if data_avg is None or len(data_avg) == 0:
+                return
+
+            V1 = data_avg[:, 3]   # µV
+            V2 = data_avg[:, 4]   # µV
+            slope = results.get("slope", 0)
+            intercept = results.get("offset", 0)
+            adj_r2 = results.get("adj_r_square", 0)
+            seebeck = results.get("Seebeck", 0)
+
+            fig, ax = plt.subplots(figsize=(10, 7))
+            ax.scatter(V1, V2, s=30, c="#5B9BD5", alpha=0.7, label="Data",
+                       edgecolors="white", linewidths=0.5)
+            # Fit line
+            v1_sorted = np.sort(V1)
+            fit_y = slope * v1_sorted + intercept
+            ax.plot(v1_sorted, fit_y, "r-", linewidth=2, label="Fit")
+
+            ax.set_xlabel("V₁ (µV)", fontsize=12, fontweight="bold")
+            ax.set_ylabel("V₂ (µV)", fontsize=12, fontweight="bold")
+            ax.set_title(f"{filename} — V₁ vs V₂ (Seebeck Fit)",
+                         fontsize=14, fontweight="bold")
+            ax.legend(fontsize=11, loc="best")
+            ax.grid(True, alpha=0.3)
+
+            # Fit annotation box
+            fit_text = (f"S = {seebeck:.3f} µV/K\n"
+                        f"adj R² = {adj_r2:.5f}\n"
+                        f"slope = {slope:.5f}")
+            ax.text(0.05, 0.95, fit_text, transform=ax.transAxes,
+                    fontsize=10, verticalalignment="top",
+                    bbox=dict(boxstyle="round,pad=0.5", facecolor="#333333",
+                              edgecolor="#666666", alpha=0.8),
+                    color="white")
+
+            fig.tight_layout()
+            plots_dir = seebeck_folder / "plots"
+            plots_dir.mkdir(parents=True, exist_ok=True)
+            fig.savefig(plots_dir / f"{filename}_V1_vs_V2.png",
+                        dpi=200, bbox_inches="tight")
+            plt.close(fig)
+            self._log("Saved V₁ vs V₂ fit plot")
+        except Exception as exc:
+            self._log(f"Warning: could not save V₁ vs V₂ fit plot: {exc}")
+
     # ── main entry point (called via signal) ─────────────────────────────
 
     @Slot(dict)
@@ -494,11 +605,18 @@ class _MeasurementWorker(QObject):
                     config, _current_temp, sigma_folder,
                     temp_logger, global_logger)
                 _sigma_elapsed = time.time() - _t0
+                # Save sigma iteration plot (matplotlib)
+                if sigma_results:
+                    fname = f"{config['sample_name']}_{_current_temp:.1f}C"
+                    self._save_sigma_iteration_plot(
+                        sigma_folder, fname, sigma_results)
+                self._check_abort("post-sigma")
+                self._log("Holding 10s after \u03c3 measurement ...")
+                self.status_message.emit("Holding 10s ...")
+                self._interruptible_sleep(10.0, "post-sigma hold")
 
             if do_sigma and do_seebeck:
                 self._check_abort("between measurements")
-                self._log("Safety pause (2 s) …")
-                self._interruptible_sleep(2.0, "safety pause")
 
             seebeck_results = None
             if do_seebeck:
@@ -507,11 +625,17 @@ class _MeasurementWorker(QObject):
                     config, _current_temp, seebeck_folder,
                     temp_logger, global_logger)
                 _seebeck_elapsed = time.time() - _t0
+                self._check_abort("post-seebeck")
+                self._log("Holding 10s after Seebeck measurement ...")
+                self.status_message.emit("Holding 10s ...")
+                self._interruptible_sleep(10.0, "post-seebeck hold")
 
-                # Save time-series plots for Seebeck
+                # Save all 3 Seebeck plots (time-series + fit)
                 if seebeck_results:
                     fname = f"{config['sample_name']}_{_current_temp:.1f}C"
                     self._save_seebeck_time_series_plots(
+                        seebeck_folder, fname, seebeck_results)
+                    self._save_seebeck_fit_plot(
                         seebeck_folder, fname, seebeck_results)
 
             # ── Summary ──────────────────────────────────────────────────
@@ -735,22 +859,35 @@ class _MeasurementWorker(QObject):
                     sigma_results = self._run_sigma(
                         config, actual_temp, sigma_folder,
                         temp_logger, global_logger)
+                    # Save sigma iteration plot (matplotlib)
+                    if sigma_results:
+                        fname = f"{sample_name}_{actual_temp:.1f}C"
+                        self._save_sigma_iteration_plot(
+                            sigma_folder, fname, sigma_results)
+                    self._check_abort("post-sigma")
+                    self._log("Holding 10s after \u03c3 measurement ...")
+                    self.status_message.emit("Holding 10s ...")
+                    self._interruptible_sleep(10.0, "post-sigma hold")
 
                 if do_sigma and do_seebeck:
                     self._check_abort("between measurements")
-                    self._log("Safety pause (2 s) …")
-                    self._interruptible_sleep(2.0, "safety pause")
 
                 seebeck_results = None
                 if do_seebeck:
                     seebeck_results = self._run_seebeck(
                         config, actual_temp, seebeck_folder,
                         temp_logger, global_logger)
+                    self._check_abort("post-seebeck")
+                    self._log("Holding 10s after Seebeck measurement ...")
+                    self.status_message.emit("Holding 10s ...")
+                    self._interruptible_sleep(10.0, "post-seebeck hold")
 
-                    # Save time-series plots
+                    # Save all 3 Seebeck plots (time-series + fit)
                     if seebeck_results:
                         fname = f"{sample_name}_{actual_temp:.1f}C"
                         self._save_seebeck_time_series_plots(
+                            seebeck_folder, fname, seebeck_results)
+                        self._save_seebeck_fit_plot(
                             seebeck_folder, fname, seebeck_results)
 
                 # Log point summary
@@ -763,7 +900,7 @@ class _MeasurementWorker(QObject):
                 self._log(f"{point_label} Done: {point_summary}")
                 global_logger.info(f"{point_label} Done: {point_summary}")
 
-                self.cycle_point_completed.emit(actual_temp, sigma_results, seebeck_results)
+                self.cycle_point_completed.emit(actual_temp, sigma_results, seebeck_results, str(temp_folder))
 
                 finalize_logging(temp_logger, success=True)
 
@@ -860,7 +997,7 @@ class MeasurementService(QObject):
     
     # Cycle mode hooks
     cycle_point_starting = Signal(int, float)             # (index, target_temp)
-    cycle_point_completed = Signal(float, object, object) # (actual_temp, sigma_res, seebeck_res)
+    cycle_point_completed = Signal(float, object, object, str) # (actual_temp, sigma_res, seebeck_res, folder_path)
 
     # Private signal to invoke the worker's ``run`` slot across threads.
     _request_run = Signal(dict)

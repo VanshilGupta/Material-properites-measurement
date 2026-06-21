@@ -1,0 +1,9 @@
+15-03-2026 14:08:11 | INFO     | --- Temperature sweep started ---
+15-03-2026 14:08:11 | INFO     | Sample: sample-15-03
+15-03-2026 14:08:11 | INFO     | Output: c:\Personal\Titas sir\ONS\Seeback-sigma-measurement-app\data\sample-15-03
+15-03-2026 14:08:11 | INFO     | Starting single sigma measurement
+15-03-2026 14:08:11 | INFO     | Current Temperature: -0.0°C
+15-03-2026 14:08:11 | INFO     | Thickness: 2.1 mm, Diameter: 15.0 mm
+15-03-2026 14:10:02 | INFO     | COMPLETED: Sigma = 1.27e+02 S/cm
+15-03-2026 14:10:02 | INFO     | --- Measurement completed successfully ---
+15-03-2026 14:10:02 | INFO     | End: 15-03-2026 14:10:02
