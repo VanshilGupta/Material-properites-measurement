@@ -141,9 +141,9 @@ class MethodConfigPanel(QGroupBox):
         stab_lbl = QLabel("Stability wait:")
         stab_lbl.setStyleSheet("background: transparent;")
         stab_tip = (
-            "Time to wait after each new temperature set-point before\n"
-            "measuring (default 20 min).  The start temperature has no\n"
-            "wait — it is measured as soon as the furnace reaches it."
+            "Extra wait after the expected ramp time at each new\n"
+            "temperature, before measuring (default 20 min).  The start\n"
+            "point waits only the ramp time + 30 s."
         )
         stab_lbl.setToolTip(stab_tip)
         self.stability_time_spin = QDoubleSpinBox()

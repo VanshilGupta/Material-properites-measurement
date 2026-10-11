@@ -422,7 +422,6 @@ class MainWindow(QMainWindow):
         self.eurotherm = EurothermService(self)
         # The cycle shares the Eurotherm's single COM-port connection.
         self.measurement_svc = MeasurementService(self, furnace=self.eurotherm)
-        self._temp_read_count = 0   # throttle heartbeat log: print every 30 reads (≈30 s)
 
         # Instrument status tracking
         self._instrument_states: dict[str, str] = {
@@ -983,14 +982,6 @@ class MainWindow(QMainWindow):
                 self._stop_ramp_btn.setVisible(False)
                 self._ramp_target = None
                 self._update_run_btn_state()
-
-        # Log a heartbeat every 30 successful reads (≈ every 30 s) so the
-        # operator can confirm live polling without flooding the log panel.
-        self._temp_read_count += 1
-        if self._temp_read_count % 30 == 1:   # also fires on the very first read
-            self.log_panel.append(
-                f"[Eurotherm] T = {temp_c:.1f} \u00b0C  \u2713"
-            )
 
     def _on_temp_read_failed(self):
         """Called when the controller responded but returned no usable value."""
