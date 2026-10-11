@@ -64,6 +64,13 @@ _COOL_DOWN_TEMP_C = 25.0
 _TEMP_READ_ATTEMPTS = 3
 _TEMP_RETRY_DELAY_S = 10.0
 
+# Cycle start point (no stabilisation hold): "reached" tolerance (°C), how
+# often to check (s), and the slack added to the expected ramp time before
+# measuring anyway (s).
+_START_REACH_TOLERANCE_C = 2.0
+_START_POLL_S = 10.0
+_START_REACH_MARGIN_S = 30 * 60.0
+
 
 # ─── Custom log handler that emits a Qt signal ──────────────────────────
 
@@ -775,7 +782,8 @@ class _MeasurementWorker(QObject):
 
             self._log(f"━━ Temperature Cycle: {len(temperatures)} points ━━")
             self._log(f"Points: {temperatures}")
-            self._log(f"Ramp rate: {ramp_rate} °C/min  |  Wait: {stability_sec/60:.0f} min")
+            self._log(f"Ramp rate: {ramp_rate} °C/min  |  Stability wait: "
+                      f"{stability_sec/60:g} min per point (none at the start point)")
             global_logger.info(f"Cycle: {temperatures}, rate={ramp_rate}, wait={stability_sec}s")
 
             # ── Borrow the shared Eurotherm connection ────────────────────
@@ -805,15 +813,22 @@ class _MeasurementWorker(QObject):
                     except Exception as exc:
                         self._log(f"⚠ Failed to set temperature: {exc}")
 
-                # 2. Wait for stability_time
-                wait_min = stability_sec / 60.0
-                self._log(f"Waiting {wait_min:.0f} min for stabilisation …")
-                self.status_message.emit(
-                    f"Cycle {point_label} — waiting {wait_min:.0f} min"
-                )
+                # 2. Wait.  The start point has no stabilisation hold — only
+                #    the time to reach it; every later point waits
+                #    stability_time after its set-point change.
+                if idx == 0:
+                    self._wait_for_start_temperature(
+                        eurotherm, target_temp, ramp_rate, point_label)
+                    remaining = 0.0
+                else:
+                    wait_min = stability_sec / 60.0
+                    self._log(f"Waiting {wait_min:g} min for stabilisation …")
+                    self.status_message.emit(
+                        f"Cycle {point_label} — waiting {wait_min:g} min"
+                    )
+                    remaining = stability_sec
 
                 # Countdown in 60-second chunks
-                remaining = stability_sec
                 while remaining > 0:
                     self._check_abort("stability wait")
                     chunk = min(remaining, 60.0)
@@ -831,7 +846,7 @@ class _MeasurementWorker(QObject):
                             except Exception:
                                 pass
                         self._log(
-                            f"  ⏳ {mins_left:.0f} min remaining  "
+                            f"  ⏳ {mins_left:g} min remaining  "
                             f"(current: {live_t} °C)"
                         )
 
@@ -1063,6 +1078,58 @@ class _MeasurementWorker(QObject):
                 return round(float(t), 1), name
             self._log(f"  {name}: no valid reading ({t!r})")
         return None, None
+
+    def _wait_for_start_temperature(self, eurotherm, target: float,
+                                    ramp_rate: float, point_label: str):
+        """Wait until the furnace reaches the cycle's start temperature.
+
+        The start point gets no stabilisation hold: it is measured as soon as
+        the furnace is within ``_START_REACH_TOLERANCE_C`` of the set-point
+        (immediately, if it is already there).  If that takes longer than the
+        expected ramp time plus ``_START_REACH_MARGIN_S``, it measures anyway
+        — the recorded temperature is always the actual reading, so nothing
+        is mislabelled.
+        """
+        tol = _START_REACH_TOLERANCE_C
+        if eurotherm is None:
+            self._log("⚠ No furnace connection — cannot confirm the start "
+                      "temperature; measuring now")
+            return
+
+        def read():
+            try:
+                t = eurotherm.read_temperature()
+            except MeasurementAborted:
+                raise
+            except Exception:
+                return None
+            return float(t) if is_valid_temperature(t) else None
+
+        t = read()
+        distance = abs(target - t) if t is not None else 0.0
+        timeout = distance / max(ramp_rate, 0.1) * 60.0 + _START_REACH_MARGIN_S
+        self._log(f"Start point — no stabilisation wait; waiting to reach "
+                  f"{target:.1f} °C (±{tol:g} °C) …")
+        self.status_message.emit(
+            f"Cycle {point_label} — reaching start temperature {target:.1f} °C"
+        )
+
+        waited, next_log = 0.0, 60.0
+        while t is None or abs(t - target) > tol:
+            if waited >= timeout:
+                now = f"{t:.1f} °C" if t is not None else "unreadable"
+                self._log(f"⚠ Start temperature not reached after "
+                          f"{waited/60:.0f} min (current: {now}) — measuring "
+                          f"anyway at the actual temperature")
+                return
+            self._interruptible_sleep(_START_POLL_S, "reaching start temperature")
+            waited += _START_POLL_S
+            t = read()
+            if waited >= next_log:
+                now = f"{t:.1f}" if t is not None else "?"
+                self._log(f"  ⏳ reaching {target:.1f} °C — current: {now} °C")
+                next_log += 60.0
+        self._log(f"  Start temperature reached: {t:.1f} °C ✓")
 
     def _finalize_loggers(self, global_logger, temp_logger, error_msg: str):
         """Close file loggers on failure / abort."""

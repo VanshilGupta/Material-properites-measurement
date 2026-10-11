@@ -133,6 +133,36 @@ class MethodConfigPanel(QGroupBox):
 
         vbox.addLayout(align_grid)
 
+        # ── Stability wait (visible in Temperature Cycle mode) ───────────
+        self._stability_time_row = QWidget()
+        stab_hl = QHBoxLayout(self._stability_time_row)
+        stab_hl.setContentsMargins(0, 0, 0, 0)
+        stab_hl.setSpacing(6)
+        stab_lbl = QLabel("Stability wait:")
+        stab_lbl.setStyleSheet("background: transparent;")
+        stab_tip = (
+            "Time to wait after each new temperature set-point before\n"
+            "measuring (default 20 min).  The start temperature has no\n"
+            "wait — it is measured as soon as the furnace reaches it."
+        )
+        stab_lbl.setToolTip(stab_tip)
+        self.stability_time_spin = QDoubleSpinBox()
+        self.stability_time_spin.setRange(1.0, 120.0)
+        self.stability_time_spin.setValue(20.0)
+        self.stability_time_spin.setSuffix(" min")
+        self.stability_time_spin.setDecimals(1)
+        self.stability_time_spin.setSingleStep(1.0)
+        self.stability_time_spin.setFixedWidth(100)
+        self.stability_time_spin.setToolTip(stab_tip)
+        stab_note = QLabel("per point · none at start")
+        stab_note.setStyleSheet("background: transparent; color: #8a8a8a;")
+        stab_hl.addWidget(stab_lbl)
+        stab_hl.addWidget(self.stability_time_spin)
+        stab_hl.addWidget(stab_note)
+        stab_hl.addStretch()
+        self._stability_time_row.setVisible(False)
+        vbox.addWidget(self._stability_time_row)
+
         # ── Testing Mode ─────────────────────────────────────────────────
         test_sep = QFrame()
         test_sep.setFrameShape(QFrame.Shape.HLine)
@@ -167,33 +197,6 @@ class MethodConfigPanel(QGroupBox):
         test_hl.addStretch()
         self._test_time_row.setVisible(False)
         vbox.addWidget(self._test_time_row)
-
-        # Stability wait time row (visible only when testing mode is ON)
-        self._stability_time_row = QWidget()
-        stab_hl = QHBoxLayout(self._stability_time_row)
-        stab_hl.setContentsMargins(0, 0, 0, 0)
-        stab_hl.setSpacing(6)
-        stab_lbl = QLabel("Stability wait:")
-        stab_lbl.setStyleSheet("background: transparent;")
-        stab_lbl.setToolTip(
-            "Time to wait after setting a new temperature setpoint\n"
-            "before starting the measurement (cycle mode)"
-        )
-        self.stability_time_spin = QDoubleSpinBox()
-        self.stability_time_spin.setRange(1.0, 120.0)
-        self.stability_time_spin.setValue(20.0)
-        self.stability_time_spin.setSuffix(" min")
-        self.stability_time_spin.setDecimals(1)
-        self.stability_time_spin.setSingleStep(1.0)
-        self.stability_time_spin.setFixedWidth(100)
-        self.stability_time_spin.setToolTip(
-            "Wait time after setting setpoint before measuring (default 20 min)"
-        )
-        stab_hl.addWidget(stab_lbl)
-        stab_hl.addWidget(self.stability_time_spin)
-        stab_hl.addStretch()
-        self._stability_time_row.setVisible(False)
-        vbox.addWidget(self._stability_time_row)
 
         # Initial state: cycle radios disabled, none checked
         self._set_cycle_widgets_enabled(False)
@@ -230,13 +233,14 @@ class MethodConfigPanel(QGroupBox):
     def _set_cycle_widgets_enabled(self, enabled: bool):
         self.radio_heat_only.setEnabled(enabled)
         self.radio_heat_cool.setEnabled(enabled)
+        # The stability wait only applies to temperature cycles.
+        self._stability_time_row.setVisible(enabled)
         if not enabled:
             self._uncheck_all_radios()
 
     def _on_testing_toggled(self, state):
         """Show or hide testing-mode parameters."""
         self._test_time_row.setVisible(bool(state))
-        self._stability_time_row.setVisible(bool(state))
 
     # ── Public API ────────────────────────────────────────────────────────
 

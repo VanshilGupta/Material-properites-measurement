@@ -1114,11 +1114,9 @@ class MainWindow(QMainWindow):
         else:
             seebeck_time = 480.0  # 8 minutes default
 
-        # Resolve stability wait time (testing mode or default 20 min)
-        if m_cfg.get("testing_mode", False):
-            stability_time = m_cfg.get("stability_time_min", 20.0) * 60.0
-        else:
-            stability_time = 1200.0  # 20 minutes default
+        # Stability wait per cycle point — set in the Method panel (default
+        # 20 min) in normal and testing mode alike.
+        stability_time = m_cfg.get("stability_time_min", 20.0) * 60.0
 
         config = {
             "sample_name":     name,
