@@ -154,7 +154,7 @@ class MethodConfigPanel(QGroupBox):
         self.stability_time_spin.setSingleStep(1.0)
         self.stability_time_spin.setFixedWidth(100)
         self.stability_time_spin.setToolTip(stab_tip)
-        stab_note = QLabel("per point · none at start")
+        stab_note = QLabel("per point")
         stab_note.setStyleSheet("background: transparent; color: #8a8a8a;")
         stab_hl.addWidget(stab_lbl)
         stab_hl.addWidget(self.stability_time_spin)
