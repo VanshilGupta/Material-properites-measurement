@@ -45,17 +45,24 @@ from output_manager import (                                # noqa: E402
     create_temperature_folder,
     finalize_logging,
 )
-from measure_sigma import measure_sigma, save_results_to_csv, save_iteration_data_to_csv  # noqa: E402
-from seebeck_measurement import SeebeckMeasurement           # noqa: E402
-from constants import read_current_temperature                # noqa: E402
-from eurotherm_control import EurothermController              # noqa: E402
-from constants import (                                       # noqa: E402
-    EUROTHERM_COM_PORT,
+from measure_sigma import (                                 # noqa: E402
+    MeasurementAborted, measure_sigma,
+    save_results_to_csv, save_iteration_data_to_csv,
 )
+from seebeck_measurement import SeebeckMeasurement           # noqa: E402
+from constants import is_valid_temperature, read_current_temperature  # noqa: E402
 
 # Instrument name constants (avoids duplicating literals).
 _INST_PS  = "Power Supply"
 _INST_DAQ = "Multimeter"
+
+# Furnace set-point applied whenever a temperature cycle ends (°C).
+_COOL_DOWN_TEMP_C = 25.0
+
+# Reading the actual temperature at a cycle point: tries before the point is
+# skipped, and the pause between tries (s).
+_TEMP_READ_ATTEMPTS = 3
+_TEMP_RETRY_DELAY_S = 10.0
 
 
 # ─── Custom log handler that emits a Qt signal ──────────────────────────
@@ -80,9 +87,9 @@ class _QtLogHandler(logging.Handler):
 
 
 # ─── Abort sentinel ─────────────────────────────────────────────────────
-
-class MeasurementAborted(Exception):
-    """Raised when the user requests an abort."""
+# ``MeasurementAborted`` (imported above from measure_sigma) is raised when the
+# user requests an abort.  It is defined there so the σ code can let it
+# propagate — switching the power supply off — instead of swallowing it.
 
 
 # =====================================================================
@@ -108,9 +115,12 @@ class _MeasurementWorker(QObject):
     cycle_point_completed = Signal(float, object, object, str) # (actual_temp, sigma_res, seebeck_res, temp_folder)
     measurement_finished = Signal(bool, str, dict)  # (success, summary, metadata)
 
-    def __init__(self):
+    def __init__(self, furnace=None):
         super().__init__()
         self._abort_event = threading.Event()
+        # EurothermService that owns the single furnace connection; the
+        # temperature cycle borrows its controller (see _acquire_furnace).
+        self._furnace = furnace
 
     # ── public control ───────────────────────────────────────────────────
 
@@ -576,14 +586,20 @@ class _MeasurementWorker(QObject):
             # ── Read current temperature ──────────────────────────────────
             self._log("Reading current temperature …")
             self.status_message.emit("Reading temperature …")
-            gui_temp = config.get("gui_temperature")
-            daq_temp = read_current_temperature()
-            if abs(daq_temp - 25.0) < 0.01 and gui_temp is not None:
-                _current_temp = round(gui_temp, 1)
-                self._log(f"Using Eurotherm temperature: {_current_temp:.1f} °C")
-            else:
-                _current_temp = round(daq_temp, 1)
-                self._log(f"Current temperature: {_current_temp:.1f} °C")
+            sources = [("DAQ thermocouple", read_current_temperature)]
+            furnace = self._connected_furnace()
+            if furnace is not None:
+                sources.append(("Eurotherm", furnace.read_temperature))
+            _current_temp, source = self._read_actual_temperature(sources)
+            if _current_temp is None:
+                _current_temp = 0.0   # keeps the summary dialog from showing one
+                raise RuntimeError(
+                    "Could not read the temperature from the DAQ thermocouple "
+                    "or the Eurotherm — measurement NOT started (no data "
+                    "would be recorded under a made-up temperature). Check "
+                    "the instruments and try again."
+                )
+            self._log(f"Current temperature: {_current_temp:.1f} °C  (from {source})")
 
             # Guard against invalid temperature for folder name
             if _current_temp <= 0:
@@ -692,6 +708,37 @@ class _MeasurementWorker(QObject):
 
     # ── cycle measurement mode ───────────────────────────────────────────
 
+    def _acquire_furnace(self, ramp_rate: float):
+        """Return the shared furnace controller, ready for the cycle, or None.
+
+        The cycle never opens its own serial connection: the GUI's
+        ``EurothermService`` already holds the COM port (Windows allows one
+        handle per port), so a second open fails with "Access is denied".
+        We borrow that service's controller instead — its transactions are
+        lock-serialised against the live-display polling.  If the furnace
+        isn't connected yet (e.g. it was off at start-up) the service is
+        asked to connect first.
+        """
+        if self._furnace is None:
+            self._log("⚠ No Eurotherm service available — proceeding without temp control")
+            return None
+        try:
+            if not self._furnace.connect_blocking():
+                self._log("⚠ Could not connect to Eurotherm — proceeding without temp control")
+                return None
+            controller = self._furnace.controller
+            try:
+                controller.set_auto_mode()
+            except Exception as exc:
+                # Non-fatal: the furnace is normally already in Auto mode.
+                self._log(f"⚠ Could not set Eurotherm to Auto mode: {exc}")
+            controller.set_ramp_rate(ramp_rate)
+            self._log("Eurotherm connected ✓ (shared with live display)")
+            return controller
+        except Exception as exc:
+            self._log(f"⚠ Eurotherm connection error: {exc} — proceeding without")
+            return None
+
     def _run_cycle(self, config: dict):
         """Run measurements across multiple temperatures.
 
@@ -731,22 +778,11 @@ class _MeasurementWorker(QObject):
             self._log(f"Ramp rate: {ramp_rate} °C/min  |  Wait: {stability_sec/60:.0f} min")
             global_logger.info(f"Cycle: {temperatures}, rate={ramp_rate}, wait={stability_sec}s")
 
-            # ── Connect to Eurotherm ──────────────────────────────────────
-            try:
-                eurotherm = EurothermController(com_port=EUROTHERM_COM_PORT)
-                eurotherm.set_logger(global_logger)
-                if not eurotherm.connect():
-                    self._log("⚠ Could not connect to Eurotherm — proceeding without temp control")
-                    eurotherm = None
-                else:
-                    eurotherm.set_auto_mode()
-                    eurotherm.set_ramp_rate(ramp_rate)
-                    self._log("Eurotherm connected ✓")
-            except Exception as exc:
-                self._log(f"⚠ Eurotherm connection error: {exc} — proceeding without")
-                eurotherm = None
+            # ── Borrow the shared Eurotherm connection ────────────────────
+            eurotherm = self._acquire_furnace(ramp_rate)
 
             # ── Loop over temperature points ─────────────────────────────
+            skipped_targets: list[float] = []   # temperature unreadable
             for idx, target_temp in enumerate(temperatures):
                 self._check_abort("cycle loop")
                 self.cycle_point_starting.emit(idx, target_temp)
@@ -799,30 +835,34 @@ class _MeasurementWorker(QObject):
                             f"(current: {live_t} °C)"
                         )
 
-                # 3. Read actual temperature
-                actual_temp = target_temp  # fallback
+                # 3. Read actual temperature — retry, but never substitute the
+                #    target or any other made-up value.
+                sources = []
                 if eurotherm is not None:
-                    try:
-                        t = eurotherm.read_temperature()
-                        if t is not None and t > 0:
-                            actual_temp = round(t, 1)
-                    except Exception:
-                        pass
-                else:
-                    # Try DAQ
-                    try:
-                        t = read_current_temperature()
-                        if t is not None and t > 0:
-                            actual_temp = round(t, 1)
-                    except Exception:
-                        pass
+                    sources.append(("Eurotherm", eurotherm.read_temperature))
+                sources.append(("DAQ thermocouple", read_current_temperature))
+                actual_temp, source = None, None
+                for attempt in range(1, _TEMP_READ_ATTEMPTS + 1):
+                    actual_temp, source = self._read_actual_temperature(sources)
+                    if actual_temp is not None:
+                        break
+                    if attempt < _TEMP_READ_ATTEMPTS:
+                        self._log(f"  Temperature unreadable — retrying in "
+                                  f"{_TEMP_RETRY_DELAY_S:.0f} s "
+                                  f"({attempt}/{_TEMP_READ_ATTEMPTS}) …")
+                        self._interruptible_sleep(_TEMP_RETRY_DELAY_S,
+                                                  "temperature retry")
 
-                # Use gui_temperature as another fallback
-                gui_temp = config.get("gui_temperature")
-                if actual_temp <= 0 and gui_temp is not None and gui_temp > 0:
-                    actual_temp = round(gui_temp, 1)
+                if actual_temp is None:
+                    msg = (f"{point_label} ✗ SKIPPED — could not read the actual "
+                           f"temperature (target {target_temp:.1f} °C); nothing "
+                           f"measured or saved for this point")
+                    global_logger.error(msg)   # also reaches the GUI log
+                    skipped_targets.append(target_temp)
+                    continue
 
-                self._log(f"Actual temperature: {actual_temp:.1f} °C  (target was {target_temp:.1f} °C)")
+                self._log(f"Actual temperature: {actual_temp:.1f} °C  "
+                          f"(from {source}; target was {target_temp:.1f} °C)")
                 global_logger.info(f"Actual temp: {actual_temp}°C")
 
                 # 4. Create temperature folder with ACTUAL temperature
@@ -905,31 +945,37 @@ class _MeasurementWorker(QObject):
                 finalize_logging(temp_logger, success=True)
 
             # ── Cool down ─────────────────────────────────────────────────
-            if eurotherm is not None:
-                try:
-                    eurotherm.set_temperature(25.0)
-                    self._log("Cool-down: setpoint → 25 °C")
-                except Exception:
-                    pass
+            self._cool_down_furnace(eurotherm, _real_sleep)
 
             # ── Final summary ─────────────────────────────────────────────
             total = time.time() - _t_run_start
+            n_measured = len(temperatures) - len(skipped_targets)
             summary = (
-                f"Cycle complete — {len(temperatures)} temperature points "
-                f"in {total/60:.1f} min"
+                f"Cycle complete — {n_measured} of {len(temperatures)} "
+                f"temperature points in {total/60:.1f} min"
             )
+            if skipped_targets:
+                summary += (
+                    f"\n⚠ {len(skipped_targets)} point(s) SKIPPED — temperature "
+                    f"unreadable at target(s): "
+                    + ", ".join(f"{t:.1f} °C" for t in skipped_targets)
+                )
+            # A cycle where every point was skipped recorded nothing.
+            ok = n_measured > 0 or not temperatures
             self._log(summary)
-            self.status_message.emit(summary)
-            finalize_logging(global_logger, success=True)
+            self.status_message.emit(summary.splitlines()[0])
+            finalize_logging(global_logger, success=ok)
             self.phase_changed.emit("idle")
-            self.measurement_finished.emit(True, summary, {
+            self.measurement_finished.emit(ok, summary, {
                 "data_path": _data_path,
                 "total_elapsed": total,
-                "n_points": len(temperatures),
+                "n_points": n_measured,
+                "skipped_targets": skipped_targets,
             })
 
         except MeasurementAborted:
             self._log("Cycle ABORTED by user")
+            self._cool_down_furnace(eurotherm, _real_sleep)
             self.status_message.emit("Cycle aborted")
             if global_logger:
                 finalize_logging(global_logger, success=False, error_msg="User aborted")
@@ -942,6 +988,7 @@ class _MeasurementWorker(QObject):
 
         except Exception as exc:
             self._log(f"FATAL: {exc}")
+            self._cool_down_furnace(eurotherm, _real_sleep)
             self.status_message.emit(f"Error: {exc}")
             if global_logger:
                 finalize_logging(global_logger, success=False, error_msg=str(exc))
@@ -954,12 +1001,68 @@ class _MeasurementWorker(QObject):
 
         finally:
             time.sleep = _real_sleep
-            # Disconnect Eurotherm
-            if eurotherm is not None:
-                try:
-                    eurotherm.disconnect()
-                except Exception:
-                    pass
+            # The Eurotherm connection is shared with the live display and
+            # owned by EurothermService — deliberately left open.
+
+    def _cool_down_furnace(self, eurotherm, real_sleep):
+        """Set the furnace back to a safe set-point when a cycle ends.
+
+        Runs on every exit — completed, aborted or failed — so the furnace is
+        never left at a high set-point unattended.  The real ``time.sleep`` is
+        restored first: after an abort the patched one raises, which would
+        break the MODBUS write's inter-frame delay.
+        """
+        if eurotherm is None:
+            return
+        time.sleep = real_sleep
+        try:
+            # Local controller returns False on failure; remote one raises.
+            if eurotherm.set_temperature(_COOL_DOWN_TEMP_C) is False:
+                raise RuntimeError("controller did not accept the set-point")
+            self._log(f"Cool-down: setpoint → {_COOL_DOWN_TEMP_C:.0f} °C")
+        except Exception as exc:
+            self._log(f"⚠ Could not set cool-down setpoint ({exc}) — "
+                      "SET THE FURNACE MANUALLY")
+
+    # ── temperature reading ──────────────────────────────────────────────
+
+    def _connected_furnace(self):
+        """The shared furnace controller if it is already connected, else None.
+
+        Never opens a connection (that can mean a slow COM-port scan); it
+        only borrows the one the live display already holds.
+        """
+        if self._furnace is None:
+            return None
+        try:
+            controller = self._furnace.controller
+            return controller if controller.is_connected() else None
+        except Exception:
+            return None
+
+    def _read_actual_temperature(self, sources):
+        """Read the temperature from the first source that gives a real value.
+
+        Args:
+            sources: ordered ``[(name, read_fn), ...]``.
+
+        Returns:
+            ``(temp_c, source_name)`` rounded to 0.1 °C, or ``(None, None)``
+            if every source failed.  Failed, missing or implausible readings
+            are logged and skipped — a substitute value is never returned.
+        """
+        for name, read in sources:
+            try:
+                t = read()
+            except MeasurementAborted:
+                raise
+            except Exception as exc:
+                self._log(f"  {name}: read failed ({exc})")
+                continue
+            if is_valid_temperature(t):
+                return round(float(t), 1), name
+            self._log(f"  {name}: no valid reading ({t!r})")
+        return None, None
 
     def _finalize_loggers(self, global_logger, temp_logger, error_msg: str):
         """Close file loggers on failure / abort."""
@@ -1002,10 +1105,16 @@ class MeasurementService(QObject):
     # Private signal to invoke the worker's ``run`` slot across threads.
     _request_run = Signal(dict)
 
-    def __init__(self, parent: QObject = None):
+    def __init__(self, parent: QObject = None, furnace=None):
+        """
+        Args:
+            furnace: The app's ``EurothermService``.  Temperature cycles use
+                its (single, shared) furnace connection.  Without it, cycles
+                run with no temperature control.
+        """
         super().__init__(parent)
         self._thread = QThread()
-        self._worker = _MeasurementWorker()
+        self._worker = _MeasurementWorker(furnace)
         self._worker.moveToThread(self._thread)
 
         # Forward worker signals → own signals.

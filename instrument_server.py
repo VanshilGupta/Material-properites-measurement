@@ -9,11 +9,15 @@ can read/write instruments without UltraViewer or NI-VISA-Server.
 Usage (on the lab PC):
     python instrument_server.py
 
-Then on your PC set in constants.py:
-    REMOTE_MODE              = True
-    INSTRUMENT_SERVER_HOST   = "<lab-PC-LAN-IP>"
-    INSTRUMENT_SERVER_PORT   = 8765
-    INSTRUMENT_SERVER_TOKEN  = "seebeck-lab-token-change-me"  # must match TOKEN below
+Then on your PC set in settings.ini (see settings.example.ini):
+    [mode]    remote = true
+    [remote]  host = <lab-PC-LAN-IP>
+              port = 8765
+              token = <shared secret>   # must match the token this server expects
+
+The VISA strings and the Eurotherm COM port are read from the settings.ini on
+THIS (lab) PC; with [eurotherm] auto_detect = true the server scans for the
+Eurotherm if the configured COM port does not answer.
 
 Security
 --------
@@ -59,7 +63,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 log = logging.getLogger("instrument_server")
 
 # ── shared token ─────────────────────────────────────────────────────────────
-TOKEN = INSTRUMENT_SERVER_TOKEN   # change in constants.py
+TOKEN = INSTRUMENT_SERVER_TOKEN   # set [remote] token in settings.ini
 
 
 # ─── Global instrument state ─────────────────────────────────────────────────
@@ -321,8 +325,14 @@ def eurotherm_connect():
     if not state.eurotherm.is_connected():
         ok = state.eurotherm.connect()
         if not ok:
-            raise HTTPException(500, f"Eurotherm failed to connect on COM{EUROTHERM_COM_PORT}. Check cable/port.")
-    return _ok({"com_port": EUROTHERM_COM_PORT})
+            raise HTTPException(
+                500,
+                f"Eurotherm failed to connect (configured COM{EUROTHERM_COM_PORT}, "
+                f"auto-detect {'on' if state.eurotherm.auto_detect else 'off'}). "
+                "Check cable/port and the server log.",
+            )
+    # Report the port actually in use — auto-detect may have moved it.
+    return _ok({"com_port": state.eurotherm.com_port})
 
 
 @app.post("/eurotherm/disconnect", dependencies=[Depends(verify_token)])
@@ -352,6 +362,12 @@ def eurotherm_set_ramp_rate(body: SetRampRateCmd):
     return _ok()
 
 
+@app.post("/eurotherm/set_auto_mode", dependencies=[Depends(verify_token)])
+def eurotherm_set_auto_mode():
+    _require_eurotherm().set_auto_mode()
+    return _ok()
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # Entry point
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -366,7 +382,7 @@ if __name__ == "__main__":
     print(f"\n{'=' * 60}")
     print(f"  Instrument Server")
     print(f"  Listening on  http://{args.host}:{args.port}")
-    print(f"  Token         {TOKEN[:8]}... (set INSTRUMENT_SERVER_TOKEN in constants.py)")
+    print(f"  Token         {TOKEN[:8]}... (set [remote] token in settings.ini)")
     print(f"{'=' * 60}\n")
 
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")

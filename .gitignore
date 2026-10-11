@@ -1,3 +1,6 @@
 PROJECT_GUIDE.md
 .github/instructions/1st.instructions.md
 constants.py
+
+# Machine-specific settings and the remote token (settings.example.ini is the template)
+settings.ini

@@ -116,7 +116,10 @@ rm = pyvisa.ResourceManager()
 print(rm.list_resources())
 ```
 
-Update `constants.py` with your instrument addresses.
+Copy `settings.example.ini` to `settings.ini` and put your instrument addresses
+there (VISA strings, Eurotherm COM port, remote-PC host/token).  No code edits
+needed.  The Eurotherm COM port is auto-detected if the configured one doesn't
+answer (`[eurotherm] auto_detect`).
 
 ### 5. Run Measurements
 

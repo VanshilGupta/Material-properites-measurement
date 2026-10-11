@@ -41,6 +41,27 @@ except ImportError:  # pragma: no cover - remote-mode environments
         error_code = None
 
 
+class MeasurementAborted(Exception):
+    """Raised when the user aborts (the GUI patches ``time.sleep`` to raise it).
+
+    Defined here, not in the GUI, so the handlers below can let it through
+    instead of swallowing it as an ordinary error.  The GUI's measurement
+    service imports and raises this same class.
+    """
+
+
+def _output_off(ps):
+    """Switch the power-supply output off.  Never raises.
+
+    Called on every exit path once the output may be on, so an abort or an
+    error can never leave current flowing through the sample.
+    """
+    try:
+        ps.write(':OUTP:STAT OFF')
+    except Exception as e:
+        print(f"✗ WARNING: could not switch power supply output off: {e}")
+
+
 def _make_resource_manager():
     """Return a resource manager appropriate for the active mode.
 
@@ -227,11 +248,17 @@ def measure_sigma(sample_t=None, sample_dia=None, verbose=True, logger=None,
             print("  ✓ Power Supply configured, CH3 ON at 0.1A")
         
         time.sleep(2)  # Wait for stabilization
-        
+
+    except MeasurementAborted:
+        _output_off(ps)
+        daq.close()
+        ps.close()
+        raise
     except _VisaIOError as e:
         print(f"✗ ERROR: Failed to configure Power Supply")
         print(f"  Error: {e}")
         print(f"  Solution: Check if power supply supports these SCPI commands")
+        _output_off(ps)
         daq.close()
         ps.close()
         return None
@@ -239,6 +266,7 @@ def measure_sigma(sample_t=None, sample_dia=None, verbose=True, logger=None,
         print(f"✗ ERROR: Unexpected error configuring Power Supply")
         print(f"  {type(e).__name__}: {e}")
         traceback.print_exc()
+        _output_off(ps)
         daq.close()
         ps.close()
         return None
@@ -340,7 +368,9 @@ def measure_sigma(sample_t=None, sample_dia=None, verbose=True, logger=None,
                 print(f"  {label} ({channel}-{route}): {voltage:.6f} V")
             
             return voltage
-            
+
+        except MeasurementAborted:
+            raise
         except Exception as e:
             print(f"✗ ERROR in {label} (iteration {iteration}): {type(e).__name__}: {e}")
             return None
@@ -348,6 +378,8 @@ def measure_sigma(sample_t=None, sample_dia=None, verbose=True, logger=None,
             if daq_inst:
                 daq_inst.close()
             if ps_inst:
+                # Abort or error during the 2 s wait skips the OFF above.
+                _output_off(ps_inst)
                 ps_inst.close()
     
     if verbose:
@@ -466,7 +498,9 @@ def measure_sigma(sample_t=None, sample_dia=None, verbose=True, logger=None,
             iteration_results.append(iter_data)
             if progress_callback:
                 progress_callback(iter_data)
-                
+
+        except MeasurementAborted:
+            raise
         except Exception as e:
             print(f"✗ ERROR calculating resistivity (iteration {j+1})")
             print(f"  {type(e).__name__}: {e}")
@@ -540,6 +574,16 @@ def measure_sigma(sample_t=None, sample_dia=None, verbose=True, logger=None,
     return results
 
 
+def _result_temperature(results):
+    """Return the measurement temperature (°C) as a CSV cell string.
+
+    The GUI stores it as ``'temperature'``; run_sigma.py / run_combined.py
+    store it as ``'actual_temp'``.  Empty if neither is present.
+    """
+    temp = results.get('temperature', results.get('actual_temp'))
+    return f"{temp:.2f}" if temp is not None else ""
+
+
 def save_results_to_csv(results, sample_name, output_folder=None):
     """
     Save measurement results to CSV file in the output folder.
@@ -568,6 +612,7 @@ def save_results_to_csv(results, sample_name, output_folder=None):
         headers = [
             'Sample Name',
             'Timestamp',
+            'Temperature (°C)',
             'Corrected Sigma (S/cm)',
             'Uncorrected Sigma (S/cm)',
             'Standard Deviation',
@@ -583,6 +628,7 @@ def save_results_to_csv(results, sample_name, output_folder=None):
         data = [
             sample_name,
             timestamp,
+            _result_temperature(results),
             f"{results['corr_sigma']:.6f}",
             f"{results['uncorr_sigma']:.6f}",
             f"{results['std_dev']:.6f}",
@@ -594,7 +640,7 @@ def save_results_to_csv(results, sample_name, output_folder=None):
         ]
         
         # Write to CSV
-        with open(filepath, 'w', encoding='utf-8') as f:
+        with open(filepath, 'w', encoding='utf-8-sig') as f:
             f.write(','.join(headers) + '\n')
             f.write(','.join(data) + '\n')
         
@@ -627,7 +673,8 @@ def save_iteration_data_to_csv(results, sample_name, output_folder=None):
         filepath = folder / f"{sample_name}_sigma_iterations.csv"
 
         headers = [
-            "Iteration", "V1 (V)", "V2 (V)", "V3 (V)", "V4 (V)",
+            "Iteration", "Temperature (°C)",
+            "V1 (V)", "V2 (V)", "V3 (V)", "V4 (V)",
             "Delta_V1 (V)", "Delta_V2 (V)", "R1 (Ohm)", "R2 (Ohm)",
             "Sigma (S/cm)",
         ]
@@ -635,11 +682,14 @@ def save_iteration_data_to_csv(results, sample_name, output_folder=None):
         def _fmt(v):
             return f"{v:.6f}" if v is not None else ""
 
-        with open(filepath, "w", encoding="utf-8") as f:
+        temp_str = _result_temperature(results)
+
+        with open(filepath, "w", encoding="utf-8-sig") as f:
             f.write(",".join(headers) + "\n")
             for it in iterations:
                 row = [
                     str(it["iteration"]),
+                    temp_str,
                     _fmt(it["v1"]), _fmt(it["v2"]),
                     _fmt(it["v3"]), _fmt(it["v4"]),
                     _fmt(it["delta_v1"]), _fmt(it["delta_v2"]),

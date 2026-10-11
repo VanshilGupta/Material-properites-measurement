@@ -420,7 +420,8 @@ class MainWindow(QMainWindow):
 
         # Backend
         self.eurotherm = EurothermService(self)
-        self.measurement_svc = MeasurementService(self)
+        # The cycle shares the Eurotherm's single COM-port connection.
+        self.measurement_svc = MeasurementService(self, furnace=self.eurotherm)
         self._temp_read_count = 0   # throttle heartbeat log: print every 30 reads (≈30 s)
 
         # Instrument status tracking
@@ -1126,7 +1127,6 @@ class MainWindow(QMainWindow):
             "measure_sigma":   m_cfg["measure_conductivity"],
             "measure_seebeck": m_cfg["measure_seebeck"],
             "seebeck_time":    seebeck_time,
-            "gui_temperature": getattr(self, "_last_known_temp", None),
             "base_dir":        self._output_dir,
         }
 

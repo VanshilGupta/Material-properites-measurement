@@ -4,7 +4,8 @@
 > the GUI.  Feed this file at the start of a new chat session so the
 > assistant knows exactly what exists, what works, and what remains.
 >
-> **Last updated**: 2026-05-20 — Codebase-wide cleanup pass:
+> **Last updated**: settings.ini + Eurotherm COM-port auto-detection —
+> see **Section 0** below.  (Earlier note: 2026-05-20 — Codebase-wide cleanup pass:
 > fixed latent `pyvisa.VisaIOError` NameError in `measure_sigma.py`,
 > removed blocking 5 s sleep in `SeebeckPlotter.save_plot`, cleaned
 > unused imports and stale aliases, polished docstrings.  No GUI-layer
@@ -16,6 +17,61 @@
 > methods (`_save_sigma_iteration_plot`, `_save_seebeck_fit_plot`),
 > added graph Download/Reset/Collapse buttons, disabled pyqtgraph right-click
 > menu, added DATA PATH section to confirm dialog, added graph collapse/expand.
+
+---
+
+## 0. Runtime settings & Eurotherm port auto-detection (newest)
+
+**`settings.ini`** (git-ignored; template = `settings.example.ini`) holds every
+machine-specific value: `[mode] remote`, `[remote] host/port/token`,
+`[instruments] daq_resource/ps_resource`, `[eurotherm] com_port/device_address/
+baud_rate/timeout/auto_detect/probe_timeout`, `[sample] default_*`.
+`app_config.py` loads it (stdlib `configparser`, missing file/keys/bad values →
+built-in neutral defaults) into a frozen `settings` object; `constants.py`
+re-exports those values under the **same constant names**, so no importer
+changed.  Override the path with env var `TMS_SETTINGS`.  Frozen build: the file
+sits next to the `.exe`.  Remote setups: the lab PC has its **own**
+`settings.ini` (VISA strings + COM port are read there by `instrument_server.py`).
+
+**Eurotherm auto-detect** (`eurotherm_control.py`, section "COM Port
+Auto-Detection"): `EurothermController.connect()` with `auto_detect` on →
+`find_eurotherm_port()`:
+1. `list_com_ports()` enumerates all `COMn` ports (pyserial `comports()`);
+2. probes the configured `com_port` first (even if the OS didn't list it);
+3. only if it doesn't answer, probes every other port one by one (ascending),
+   stopping at the first hit.
+`probe_port()` sends a MODBUS read of the PV register and accepts only a
+CRC-valid, correct-address, function-3 reply (2 tries per port, `probe_timeout`
+each).  Busy/missing/silent ports are recorded, never raise.  The winner is
+stored in `controller.com_port`; the log warns if it differs from settings.ini.
+Nothing found → `connect()` returns False with a per-port summary.
+`auto_detect = false` restores strict single-port behaviour.
+Limits: only `COMn` names; baud rate / device address are NOT scanned; a
+detected port is not written back to settings.ini.
+Tests: `tests/test_eurotherm_port_detection.py`, `tests/test_app_config.py`
+(`python -m pytest tests`).
+
+**One furnace connection, shared (fixes "Access is denied" in Temperature
+Cycle).**  Windows allows one open handle per COM port.  `EurothermService`
+(started at GUI launch) owns it; the cycle used to open a *second*
+`EurothermController` on the same port → PermissionError → ran with no
+temperature control.  Now:
+- `MainWindow` builds `MeasurementService(self, furnace=self.eurotherm)`.
+- `_MeasurementWorker._acquire_furnace()` calls
+  `EurothermService.connect_blocking()` (Qt `BlockingQueuedConnection` to the
+  worker's `ensure_connected` slot — connects only if not connected; worker
+  threads only) and then uses `EurothermService.controller` directly.  It no
+  longer disconnects at the end (the service owns the connection).
+- `EurothermController` wraps every MODBUS transaction + connect/disconnect
+  in an `RLock` (`@_serialized`), so cycle set-points and the 1 s polling
+  never interleave on the wire (also protects concurrent requests in
+  `instrument_server.py`).  Test: `tests/test_eurotherm_thread_safety.py`.
+- Remote mode now works for cycles too (previously the cycle ignored
+  `REMOTE_MODE` and opened a local port).  Added `set_auto_mode` to
+  `RemoteEurothermController` + `POST /eurotherm/set_auto_mode` on the server;
+  an older server without it only logs a warning.
+- Rule going forward: **never construct a second EurothermController for the
+  GUI** — borrow `EurothermService.controller`.
 
 ---
 
@@ -335,8 +391,8 @@ connection, fully thread-safe).
 
 #### Constants used
 
-From `constants.py`:
-- `EUROTHERM_COM_PORT = 5`  (COM5)
+From `constants.py` (values come from `settings.ini`):
+- `EUROTHERM_COM_PORT = 5`  (COM5; tried first, then auto-detect scan)
 - `EUROTHERM_DEVICE_ADDRESS = 1`
 - `EUROTHERM_BAUD_RATE = 9600`
 - `EUROTHERM_TIMEOUT = 2.0`
@@ -702,7 +758,7 @@ The service wraps this class.  Key methods:
 
 | Method                    | Returns          | What it does                              |
 | ------------------------- | ---------------- | ----------------------------------------- |
-| `connect()`               | `bool`           | Opens COM port, returns True on success   |
+| `connect()`               | `bool`           | Finds port (configured first, then scan if `auto_detect`), opens it |
 | `disconnect()`            | `None`           | Closes serial port                        |
 | `is_connected()`          | `bool`           | Checks `_connected` flag                  |
 | `read_temperature()`      | `Optional[float]`| Reads PV register (current temp in °C)    |

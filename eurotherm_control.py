@@ -14,13 +14,21 @@ Key Features:
 - Set ramp rate (°C/min)
 - Wait for temperature stabilization
 - Auto/Manual mode control
+- COM-port auto-detection (configured port first, then probe every other port)
 """
 
+import functools
+import re
 import serial
+import serial.tools.list_ports
 import struct
 import time
 import logging
-from typing import Optional, Tuple, List
+import threading
+from dataclasses import dataclass, field
+from typing import Callable, Optional, Tuple, List
+
+from app_config import settings as _settings
 
 
 # =============================================================================
@@ -68,6 +76,22 @@ def verify_crc16(data: bytes) -> bool:
 # Eurotherm Controller Class
 # =============================================================================
 
+def _serialized(method):
+    """Run ``method`` holding the controller's I/O lock.
+
+    One serial port carries one MODBUS conversation at a time.  The GUI polls
+    the temperature on one thread while a temperature cycle sets set-points
+    from another (and the instrument server handles requests concurrently),
+    so every request/response exchange must finish before the next begins.
+    The lock is re-entrant because ``connect()`` reads the temperature.
+    """
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with self._io_lock:
+            return method(self, *args, **kwargs)
+    return wrapper
+
+
 class EurothermController:
     """
     Controller class for Eurotherm temperature controllers.
@@ -88,6 +112,12 @@ class EurothermController:
         controller.wait_for_stability(target=100.0, tolerance=1.0)
         
         controller.disconnect()
+    
+    Thread safety:
+        One instance may be shared between threads — each MODBUS
+        transaction (and connect/disconnect) runs under an internal lock.
+        Share the instance; never open a second controller on the same COM
+        port, because Windows allows only one open handle per port.
     """
     
     # MODBUS Register Addresses (Eurotherm specific)
@@ -112,24 +142,36 @@ class EurothermController:
         com_port: int = 5,
         device_address: int = 1,
         baud_rate: int = 9600,
-        timeout: float = 2.0
+        timeout: float = 2.0,
+        auto_detect: Optional[bool] = None,
+        probe_timeout: Optional[float] = None,
     ):
         """
         Initialize Eurotherm controller.
         
         Args:
-            com_port: COM port number (e.g., 5 for COM5)
+            com_port: COM port number to try first (e.g., 5 for COM5)
             device_address: MODBUS device address (default: 1)
             baud_rate: Serial baud rate (default: 9600)
             timeout: Serial timeout in seconds (default: 2.0)
+            auto_detect: If the configured port does not answer, scan all COM
+                ports for the Eurotherm.  ``None`` → ``[eurotherm] auto_detect``
+                from settings.ini.
+            probe_timeout: Seconds to wait for a reply from each probed port.
+                ``None`` → ``[eurotherm] probe_timeout`` from settings.ini.
         """
         self.com_port = com_port
         self.device_address = device_address
         self.baud_rate = baud_rate
         self.timeout = timeout
+        self.auto_detect = (_settings.eurotherm_auto_detect
+                            if auto_detect is None else auto_detect)
+        self.probe_timeout = (_settings.eurotherm_probe_timeout
+                              if probe_timeout is None else probe_timeout)
         self.serial: Optional[serial.Serial] = None
         self.logger: Optional[logging.Logger] = None
         self._connected = False
+        self._io_lock = threading.RLock()
     
     def set_logger(self, logger: logging.Logger):
         """Set logger for this controller."""
@@ -144,13 +186,45 @@ class EurothermController:
     # Connection Management
     # -------------------------------------------------------------------------
     
+    @_serialized
     def connect(self) -> bool:
         """
         Connect to the Eurotherm controller.
         
+        With ``auto_detect`` on, the configured port is probed first and, only
+        if it does not answer, every other COM port is probed in turn; the
+        port that replies becomes ``self.com_port``.
+        
         Returns:
             True if connected successfully, False otherwise
         """
+        if self.auto_detect and not self._resolve_com_port():
+            self._connected = False
+            return False
+        return self._open_port()
+    
+    def _resolve_com_port(self) -> bool:
+        """Find the port the Eurotherm answers on; store it in ``com_port``."""
+        configured = self.com_port
+        result = find_eurotherm_port(
+            preferred=configured,
+            device_address=self.device_address,
+            baud_rate=self.baud_rate,
+            probe_timeout=self.probe_timeout,
+            log=self._log if self.logger else None,
+        )
+        if result.com_port is None:
+            self._log('error', f"Eurotherm not found on any COM port. {result.summary()}")
+            return False
+        if result.com_port != configured:
+            self._log('warning',
+                      f"Eurotherm found on COM{result.com_port}, not the configured "
+                      f"COM{configured} — set com_port = {result.com_port} in settings.ini")
+        self.com_port = result.com_port
+        return True
+    
+    def _open_port(self) -> bool:
+        """Open ``COM<com_port>`` and verify by reading the temperature."""
         try:
             port_name = f"COM{self.com_port}"
             self.serial = serial.Serial(
@@ -178,6 +252,7 @@ class EurothermController:
             self._connected = False
             return False
     
+    @_serialized
     def disconnect(self):
         """Disconnect from the Eurotherm controller."""
         if self.serial and self.serial.is_open:
@@ -205,6 +280,7 @@ class EurothermController:
         if self.serial:
             self.serial.reset_input_buffer()
     
+    @_serialized
     def _read_registers(self, register: int, count: int = 1) -> Optional[list]:
         """
         Read holding registers using MODBUS function code 3.
@@ -281,6 +357,7 @@ class EurothermController:
         self._log('warning', f"Register read failed after {self.MAX_READ_RETRIES} attempts (reg={register})")
         return None
     
+    @_serialized
     def _read_float(self, register: int) -> Optional[float]:
         """
         Read a full-resolution floating point value.
@@ -361,6 +438,7 @@ class EurothermController:
         self._log('warning', f"Float read failed after {self.MAX_READ_RETRIES} attempts (reg={register})")
         return None
     
+    @_serialized
     def _write_float(self, register: int, value: float) -> bool:
         """
         Write a full-resolution floating point value.
@@ -416,6 +494,7 @@ class EurothermController:
         finally:
             time.sleep(self.MODBUS_INTER_FRAME_DELAY)
     
+    @_serialized
     def _write_register(self, register: int, value: int) -> bool:
         """
         Write a single 16-bit register using MODBUS function code 16.
@@ -626,6 +705,153 @@ class EurothermController:
             'auto_mode': self.is_auto_mode(),
             'connected': self.is_connected()
         }
+
+
+# =============================================================================
+# COM Port Auto-Detection
+# =============================================================================
+#
+# Windows hands out COM numbers by plug-in order, so the Eurotherm's adapter
+# can move (COM5 → COM7) when it is plugged into another USB port.  Nothing on
+# the wire identifies a Eurotherm by itself, so we *ask*: send the standard
+# MODBUS "read process value" request and accept the port whose reply is a
+# well-formed answer from the expected device address.
+#
+#   1. list every COM port the OS reports,
+#   2. probe the configured port first,
+#   3. only if it does not answer, probe the remaining ports one by one.
+
+_COM_NAME = re.compile(r"^COM(\d+)$", re.IGNORECASE)
+_PROBE_REPLY_LEN = 7   # addr, func, byte_count(2), value(2), crc(2)
+
+
+@dataclass
+class PortAttempt:
+    """Outcome of probing a single COM port."""
+    com_port: int
+    found: bool
+    detail: str
+
+
+@dataclass
+class PortScanResult:
+    """Everything a scan learned: the winning port (if any) and the full trail."""
+    com_port: Optional[int]
+    ports_seen: List[int] = field(default_factory=list)
+    attempts: List[PortAttempt] = field(default_factory=list)
+
+    def summary(self) -> str:
+        """One line per probed port, for logs and error messages."""
+        seen = ", ".join(f"COM{n}" for n in self.ports_seen) or "none"
+        tried = "; ".join(f"COM{a.com_port}: {a.detail}" for a in self.attempts)
+        return f"Ports detected: {seen}. Probed → {tried or 'nothing'}."
+
+
+def list_com_ports() -> List[int]:
+    """Numbers of every COM port the OS currently reports, ascending."""
+    numbers = set()
+    for info in serial.tools.list_ports.comports():
+        match = _COM_NAME.match(info.device)
+        if match:
+            numbers.add(int(match.group(1)))
+    return sorted(numbers)
+
+
+def _is_valid_process_value_reply(reply: bytes, device_address: int) -> bool:
+    """True if ``reply`` is a well-formed read-register answer from the device."""
+    return (
+        len(reply) == _PROBE_REPLY_LEN
+        and verify_crc16(reply)
+        and reply[0] == device_address
+        and reply[1] == 3      # 3 + 0x80 would be an exception response
+        and reply[2] == 2      # one 16-bit register
+    )
+
+
+def probe_port(
+    com_port: int,
+    device_address: int = 1,
+    baud_rate: int = 9600,
+    timeout: float = 1.0,
+    attempts: int = 2,
+) -> PortAttempt:
+    """Open ``COM<com_port>`` and check whether a Eurotherm answers on it.
+
+    Never raises: a port that is missing, busy (open in another program) or
+    silent is reported in the returned ``PortAttempt`` so a scan can move on.
+    """
+    request = append_crc16(struct.pack(
+        '>BBHH', device_address, 3, EurothermController.REG_PROCESS_VALUE, 1))
+    try:
+        ser = serial.Serial(
+            port=f"COM{com_port}",
+            baudrate=baud_rate,
+            bytesize=serial.EIGHTBITS,
+            parity=serial.PARITY_NONE,
+            stopbits=serial.STOPBITS_ONE,
+            timeout=timeout,
+            write_timeout=timeout,
+        )
+    except (serial.SerialException, OSError, ValueError) as exc:
+        return PortAttempt(com_port, False, f"cannot open ({exc})")
+
+    try:
+        reply = b""
+        for attempt in range(attempts):
+            ser.reset_input_buffer()
+            ser.write(request)
+            reply = ser.read(_PROBE_REPLY_LEN)
+            if _is_valid_process_value_reply(reply, device_address):
+                return PortAttempt(com_port, True, "Eurotherm replied")
+            if attempt < attempts - 1:
+                time.sleep(EurothermController.RETRY_DELAY)
+        detail = (f"invalid reply ({len(reply)} bytes)" if reply
+                  else "no reply")
+        return PortAttempt(com_port, False, detail)
+    except (serial.SerialException, OSError) as exc:
+        return PortAttempt(com_port, False, f"I/O error ({exc})")
+    finally:
+        ser.close()
+
+
+def find_eurotherm_port(
+    preferred: int,
+    device_address: int = 1,
+    baud_rate: int = 9600,
+    probe_timeout: float = 1.0,
+    log: Optional[Callable[[str, str], None]] = None,
+) -> PortScanResult:
+    """Locate the Eurotherm: ``preferred`` port first, then every other port.
+
+    Args:
+        preferred: Port from settings.ini — always probed first, even if the
+            OS did not list it (a plain "cannot open" is recorded and the scan
+            carries on).
+        log: Optional ``log(level, message)`` callback.  Defaults to this
+            module's ``logging`` logger so the lab-PC server shows the scan.
+
+    Returns:
+        ``PortScanResult`` — ``com_port`` is ``None`` if nothing answered.
+    """
+    if log is None:
+        module_logger = logging.getLogger(__name__)
+        log = lambda level, msg: getattr(module_logger, level)(msg)  # noqa: E731
+
+    ports_seen = list_com_ports()
+    log('info', "Eurotherm port scan — COM ports detected: "
+                + (", ".join(f"COM{n}" for n in ports_seen) or "none"))
+
+    order = [preferred] + [n for n in ports_seen if n != preferred]
+    result = PortScanResult(com_port=None, ports_seen=ports_seen)
+    for com_port in order:
+        label = "configured" if com_port == preferred else "scan"
+        attempt = probe_port(com_port, device_address, baud_rate, probe_timeout)
+        result.attempts.append(attempt)
+        log('info', f"  COM{com_port} ({label}): {attempt.detail}")
+        if attempt.found:
+            result.com_port = com_port
+            break
+    return result
 
 
 # =============================================================================

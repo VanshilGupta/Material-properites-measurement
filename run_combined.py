@@ -73,7 +73,11 @@ def run_single_combined(
         current_temp = simulate_temperature_reading()
     else:
         current_temp = read_current_temperature()
-    
+        if current_temp is None:
+            print("✗ ERROR: Could not read the temperature from the DAQ "
+                  "thermocouple (channel 111) — measurement not started.")
+            return None, None
+
     # Create folder structure with actual temperature (for Sigma first, we'll add Seebeck subfolder)
     result = create_single_measurement_structure(sample_name, "sigma", temperature=current_temp)
     sample_folder, global_logger, temp_folder, temp_logger, sigma_folder = result

@@ -57,7 +57,11 @@ def run_single_seebeck(sample_name: str, measurement_time: float = 480.0):
         current_temp = simulate_temperature_reading()
     else:
         current_temp = read_current_temperature()
-    
+        if current_temp is None:
+            print("✗ ERROR: Could not read the temperature from the DAQ "
+                  "thermocouple (channel 111) — measurement not started.")
+            return None
+
     # Create folder structure with actual temperature
     result = create_single_measurement_structure(sample_name, "seebeck", temperature=current_temp)
     sample_folder, global_logger, temp_folder, temp_logger, seebeck_folder = result

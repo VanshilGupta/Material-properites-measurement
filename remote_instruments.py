@@ -268,3 +268,6 @@ class RemoteEurothermController(_RemoteBase):
 
     def set_ramp_rate(self, rate: float):
         self._post("set_ramp_rate", {"rate": rate})
+
+    def set_auto_mode(self):
+        self._post("set_auto_mode")

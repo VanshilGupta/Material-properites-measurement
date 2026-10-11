@@ -15,6 +15,18 @@ EurothermService  ──signals──►  _EurothermWorker
 All cross-thread calls use Qt's queued signal→slot mechanism.
 The GUI thread never touches the serial port directly.
 
+Sharing the furnace with measurements
+-------------------------------------
+This service owns the ONE connection to the furnace (Windows allows only one
+open handle per COM port).  Other worker threads — e.g. the temperature
+cycle in ``MeasurementService`` — must reuse it rather than open their own:
+
+    if service.connect_blocking():          # from a worker thread
+        service.controller.set_temperature(150.0)
+
+``EurothermController`` serialises every MODBUS transaction with an
+internal lock, so those calls interleave safely with the 1 s polling here.
+
 Signals (emitted on the GUI thread)
 ------------------------------------
 temperature_read : float
@@ -28,7 +40,7 @@ connection_changed : bool
     Emitted when connection state changes (True = connected).
 """
 
-from PySide6.QtCore import QObject, QThread, QTimer, Signal, Slot
+from PySide6.QtCore import QObject, QThread, QTimer, Qt, Signal, Slot
 import sys
 import pathlib
 
@@ -98,6 +110,16 @@ class _EurothermWorker(QObject):
         except Exception as exc:
             self.error_occurred.emit(str(exc))
             self.connection_changed.emit(False)
+
+    @Slot()
+    def ensure_connected(self):
+        """Connect only if not already connected.
+
+        Re-opening an already-open port would fail with "Access is denied",
+        so callers that merely need a live connection come through here.
+        """
+        if not self._controller.is_connected():
+            self.connect_to_furnace()
 
     @Slot()
     def disconnect_from_furnace(self):
@@ -198,6 +220,7 @@ class EurothermService(QObject):
     # Private signals used to invoke worker slots across threads.
     # Qt delivers these via the worker thread's event loop (queued).
     _request_connect = Signal()
+    _request_ensure_connected = Signal()   # blocking — see connect_blocking()
     _request_disconnect = Signal()
     _request_set_temp = Signal(float)
     _request_set_rate = Signal(float)
@@ -219,6 +242,10 @@ class EurothermService(QObject):
 
         # Wire private request signals → worker slots (queued delivery).
         self._request_connect.connect(self._worker.connect_to_furnace)
+        # Blocking: the emitting thread waits until the slot has finished.
+        self._request_ensure_connected.connect(
+            self._worker.ensure_connected, Qt.ConnectionType.BlockingQueuedConnection
+        )
         self._request_disconnect.connect(self._worker.disconnect_from_furnace)
         self._request_set_temp.connect(self._worker.set_temperature)
         self._request_set_rate.connect(self._worker.set_ramp_rate)
@@ -253,3 +280,37 @@ class EurothermService(QObject):
     def read_temperature(self):
         """Request a single temperature reading (result via signal)."""
         self._request_read_temp.emit()
+
+    # -- sharing the connection with other worker threads ------------------
+
+    @property
+    def controller(self):
+        """The shared furnace controller (local or remote).
+
+        Safe to call from any worker thread — transactions are serialised
+        inside the controller.  Do NOT connect/disconnect it directly; use
+        :meth:`connect_blocking` and :meth:`stop` so the live display and
+        status indicators stay in sync.
+        """
+        return self._worker._controller
+
+    def connect_blocking(self) -> bool:
+        """Make sure the furnace is connected; wait for the outcome.
+
+        Runs the connect on this service's thread (so polling and the
+        status indicator start as usual) and blocks the CALLER until it is
+        done.  Call it from a worker thread only: from the GUI thread it
+        would freeze the UI while the port is probed, and from this
+        service's own thread it would deadlock.
+
+        Returns:
+            True if the controller is connected afterwards.
+        """
+        if not self._thread.isRunning():
+            return False
+        if QThread.currentThread() in (self._thread, self.thread()):
+            raise RuntimeError(
+                "connect_blocking() must be called from a worker thread"
+            )
+        self._request_ensure_connected.emit()
+        return self.controller.is_connected()
