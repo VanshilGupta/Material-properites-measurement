@@ -52,6 +52,7 @@ from gui.widgets import (
     LogPanel,
 )
 from gui.backend import EurothermService, MeasurementService
+from measure_sigma import TEMPERATURE_FAILED_TEXT
 
 _GUI_DIR   = pathlib.Path(__file__).resolve().parent
 _ROOT_DIR  = _GUI_DIR.parent
@@ -1215,9 +1216,18 @@ class MainWindow(QMainWindow):
     def _on_cycle_point_completed(self, actual_temp: float, sigma_res: dict, seebeck_res: dict, folder_path: str = ""):
         if sigma_res:
             corr = sigma_res.get("corr_sigma", 0.0)
-            self._summary_sigma.append((actual_temp, corr))
-            self.graph_sigma_vs_temp.append_to("\u03c3 vs T", actual_temp, corr)
-            self.graph_sigma_vs_temp._plot.autoRange()
+            # \u03c3 is plotted against the SAMPLE temperature (DAQ ch 111) read
+            # for that measurement; None means it failed to record.
+            sample_t = sigma_res.get("temperature")
+            self._summary_sigma.append((sample_t, corr))
+            if sample_t is not None:
+                self.graph_sigma_vs_temp.append_to("\u03c3 vs T", sample_t, corr)
+                self.graph_sigma_vs_temp._plot.autoRange()
+            else:
+                self.log_panel.append(
+                    f"\u26a0 \u03c3 at the {actual_temp:.1f} \u00b0C point: sample "
+                    "temperature failed to record \u2014 left off the \u03c3 vs T graph"
+                )
             if folder_path:
                 import os
                 self.graph_sigma_iter.save_clean_png(os.path.join(folder_path, "Sigma", "sigma_iterations.png"))
@@ -1232,14 +1242,16 @@ class MainWindow(QMainWindow):
         try:
             name = self.sample_panel.get_sample_name()
             if self._summary_sigma:
-                temps = [t for t, _ in self._summary_sigma]
-                vals  = [s for _, s in self._summary_sigma]
+                # The graph needs a temperature; the CSV keeps every point.
+                temps = [t for t, _ in self._summary_sigma if t is not None]
+                vals  = [s for t, s in self._summary_sigma if t is not None]
                 csv_path = os.path.join(dir_path, f"{name}_Sigma_vs_Temp.csv")
-                with open(csv_path, "w", newline="") as f:
+                with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
                     writer = csv.writer(f)
-                    writer.writerow(["Temperature (°C)", "Conductivity (S/cm)"])
+                    writer.writerow(["Sample Temperature (°C)", "Conductivity (S/cm)"])
                     for t, s in self._summary_sigma:
-                        writer.writerow([f"{t:.2f}", f"{s:.6e}"])
+                        t_cell = f"{t:.2f}" if t is not None else TEMPERATURE_FAILED_TEXT
+                        writer.writerow([t_cell, f"{s:.6e}"])
                 png_path = os.path.join(dir_path, f"{name}_Sigma_vs_Temp.png")
                 self._export_matplotlib_png(
                     temps, vals, png_path,

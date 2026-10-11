@@ -46,7 +46,7 @@ from output_manager import (                                # noqa: E402
     finalize_logging,
 )
 from measure_sigma import (                                 # noqa: E402
-    MeasurementAborted, measure_sigma,
+    TEMPERATURE_FAILED_TEXT, MeasurementAborted, measure_sigma,
     save_results_to_csv, save_iteration_data_to_csv,
 )
 from seebeck_measurement import SeebeckMeasurement           # noqa: E402
@@ -63,6 +63,10 @@ _COOL_DOWN_TEMP_C = 25.0
 # skipped, and the pause between tries (s).
 _TEMP_READ_ATTEMPTS = 3
 _TEMP_RETRY_DELAY_S = 10.0
+
+# Pause between tries when reading the sample temperature (DAQ ch 111) for
+# the σ data (s); it is tried _TEMP_READ_ATTEMPTS times.
+_SAMPLE_TEMP_RETRY_S = 2.0
 
 # Cycle start point: hold after the expected ramp time (s), used instead of
 # the stability time.
@@ -197,6 +201,9 @@ class _MeasurementWorker(QObject):
 
         try:
             self._log(f"Sample: {thickness} mm × {diameter} mm  |  5 VDP iterations")
+            # The σ data records the SAMPLE's temperature (DAQ ch 111), read
+            # just before σ starts — never the furnace's.
+            sample_temp = self._read_sample_temperature()
             results = measure_sigma(
                 sample_t=thickness, sample_dia=diameter,
                 verbose=True, logger=temp_logger,
@@ -204,7 +211,9 @@ class _MeasurementWorker(QObject):
             )
 
             if results:
-                results["temperature"] = current_temp
+                results["temperature"] = sample_temp
+                if sample_temp is None:
+                    results["temperature_note"] = TEMPERATURE_FAILED_TEXT
                 save_results_to_csv(
                     results,
                     f"{sample_name}_{current_temp:.1f}C",
@@ -1070,6 +1079,26 @@ class _MeasurementWorker(QObject):
                 return round(float(t), 1), name
             self._log(f"  {name}: no valid reading ({t!r})")
         return None, None
+
+    def _read_sample_temperature(self) -> Optional[float]:
+        """Sample temperature from the DAQ thermocouple (channel 111), or None.
+
+        Tried ``_TEMP_READ_ATTEMPTS`` times.  There is deliberately no
+        fallback to the furnace: the σ data holds the sample's own
+        temperature or states that it failed to record.
+        """
+        for attempt in range(1, _TEMP_READ_ATTEMPTS + 1):
+            t = read_current_temperature()
+            if t is not None:
+                t = round(t, 1)
+                self._log(f"Sample temperature (ch 111): {t:.1f} °C")
+                return t
+            if attempt < _TEMP_READ_ATTEMPTS:
+                self._interruptible_sleep(_SAMPLE_TEMP_RETRY_S,
+                                          "sample temperature retry")
+        self._log(f"⚠ Sample temperature (ch 111) could not be read — the σ "
+                  f"data will say '{TEMPERATURE_FAILED_TEXT}'")
+        return None
 
     def _furnace_reading(self, eurotherm):
         """One quiet furnace reading in °C, or None if unavailable/invalid."""

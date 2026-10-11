@@ -574,14 +574,21 @@ def measure_sigma(sample_t=None, sample_dia=None, verbose=True, logger=None,
     return results
 
 
+# Written in the temperature cell when the sample temperature couldn't be read.
+TEMPERATURE_FAILED_TEXT = "Failed to record"
+
+
 def _result_temperature(results):
     """Return the measurement temperature (°C) as a CSV cell string.
 
-    The GUI stores it as ``'temperature'``; run_sigma.py / run_combined.py
-    store it as ``'actual_temp'``.  Empty if neither is present.
+    The GUI stores the sample temperature as ``'temperature'`` (``None`` plus
+    a ``'temperature_note'`` if it couldn't be read); run_sigma.py /
+    run_combined.py store ``'actual_temp'``.  Empty if nothing is present.
     """
     temp = results.get('temperature', results.get('actual_temp'))
-    return f"{temp:.2f}" if temp is not None else ""
+    if temp is None:
+        return results.get('temperature_note', "")
+    return f"{temp:.2f}"
 
 
 def save_results_to_csv(results, sample_name, output_folder=None):
