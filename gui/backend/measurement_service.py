@@ -69,6 +69,12 @@ _TEMP_RETRY_DELAY_S = 10.0
 _START_EXTRA_WAIT_S = 30.0
 
 
+def _fmt_minutes(seconds: float) -> str:
+    """'20 min', '2.5 min' — whole minutes without a trailing '.0'."""
+    text = f"{seconds / 60:.1f}"
+    return (text[:-2] if text.endswith(".0") else text) + " min"
+
+
 # ─── Custom log handler that emits a Qt signal ──────────────────────────
 
 class _QtLogHandler(logging.Handler):
@@ -825,12 +831,16 @@ class _MeasurementWorker(QObject):
                     from_temp = temperatures[idx - 1]
                 ramp_sec = (abs(target_temp - from_temp) / max(ramp_rate, 0.1) * 60.0
                             if from_temp is not None else 0.0)
+                self._countdown(ramp_sec,
+                                f"Cycle {point_label} — ramping to {target_temp:.1f} °C")
                 if idx == 0:
-                    hold_sec, hold_name = _START_EXTRA_WAIT_S, "30 s"
+                    self._countdown(_START_EXTRA_WAIT_S,
+                                    f"Cycle {point_label} — settling")
                 else:
-                    hold_sec, hold_name = stability_sec, "stabilisation"
-                self._countdown(ramp_sec + hold_sec,
-                                f"Cycle {point_label} — ramp + {hold_name}")
+                    # Stabilisation is logged: once at the start, then every minute.
+                    self._countdown(stability_sec,
+                                    f"Cycle {point_label} — stabilising",
+                                    log_label="Stabilisation")
 
                 # 3. Read actual temperature — retry, but never substitute the
                 #    target or any other made-up value.
@@ -1073,11 +1083,25 @@ class _MeasurementWorker(QObject):
             return None
         return float(t) if is_valid_temperature(t) else None
 
-    def _countdown(self, seconds: float, status_prefix: str):
+    def _countdown(self, seconds: float, status_prefix: str,
+                   log_label: Optional[str] = None):
         """Wait ``seconds`` (abortable), showing the time left in the status bar.
 
-        Deliberately silent in the log panel — only the status bar updates.
+        Silent otherwise, unless ``log_label`` is given: then the wait is
+        announced when it starts and the time remaining every minute, in the
+        log panel and on the console.
         """
+        def announce(msg):
+            self._log(msg)
+            try:
+                print(msg, flush=True)
+            except Exception:
+                # A console that can't encode "⏳" (or none at all, in the
+                # windowed .exe) must never interrupt the measurement.
+                pass
+
+        if log_label and seconds > 0:
+            announce(f"{log_label}: waiting {_fmt_minutes(seconds)} …")
         remaining = seconds
         while remaining > 0:
             self.status_message.emit(
@@ -1085,6 +1109,8 @@ class _MeasurementWorker(QObject):
             chunk = min(remaining, 60.0)
             self._interruptible_sleep(chunk, "stability wait")
             remaining -= chunk
+            if log_label and remaining > 0:
+                announce(f"  ⏳ {log_label}: {_fmt_minutes(remaining)} remaining")
 
     def _finalize_loggers(self, global_logger, temp_logger, error_msg: str):
         """Close file loggers on failure / abort."""
