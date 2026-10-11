@@ -39,6 +39,7 @@ uvicorn>=0.29.0
 
 # Required on your PC (client side, used by remote_instruments.py):
 requests>=2.31.0
+pytest
 
 # ============================================================================
 # Installation Instructions:

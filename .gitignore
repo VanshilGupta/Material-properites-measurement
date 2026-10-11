@@ -4,3 +4,11 @@ constants.py
 
 # Machine-specific settings and the remote token (settings.example.ini is the template)
 settings.ini
+
+# Python bytecode cache — regenerated automatically, never commit
+__pycache__/
+*.py[cod]
+
+# Test / coverage caches
+.pytest_cache/
+.coverage
