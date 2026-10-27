@@ -189,8 +189,7 @@ def create_temp_sweep_structure(
     data/
     └── SampleX/
         ├── global_log.log
-        ├── SampleX_Sigma_vs_Temp.csv
-        ├── SampleX_Seebeck_vs_Temp.csv
+        ├── SampleX_master.csv   (σ + Seebeck, one row per point)
         ├── 100C/
         │   ├── log.log
         │   ├── Sigma/

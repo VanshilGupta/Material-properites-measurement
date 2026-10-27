@@ -298,15 +298,16 @@ def save_seebeck_vs_temp(sample_folder: Path, sample_name: str, results: list):
     df.to_csv(csv_path, index=False)
     print(f"Saved: {csv_path}")
     
-    # Create plot
+    # Create plot — against the SAMPLE's mean temperature (all T1 and T2
+    # readings of the run), not the furnace set-point
     fig, ax = plt.subplots(figsize=(10, 6))
-    valid = ~np.isnan(data['Seebeck_uV_K'])
-    
+    valid = ~np.isnan(data['Seebeck_uV_K']) & ~np.isnan(data['T_avg_C'])
+
     if any(valid):
-        temps = np.array(data['Target_Temp_C'])[valid]
+        temps = np.array(data['T_avg_C'])[valid]
         seebeck = np.array(data['Seebeck_uV_K'])[valid]
         ax.plot(temps, seebeck, 'o-', markersize=8, linewidth=2)
-    ax.set_xlabel('Temperature (°C)', fontsize=12, fontweight='bold')
+    ax.set_xlabel('Sample Temperature (°C)', fontsize=12, fontweight='bold')
     ax.set_ylabel('Seebeck Coefficient (µV/K)', fontsize=12, fontweight='bold')
     ax.set_title(f'{sample_name} - Seebeck vs Temperature', fontsize=14, fontweight='bold')
     ax.grid(True, alpha=0.3)

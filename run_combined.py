@@ -18,7 +18,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from pathlib import Path
 
-from measure_sigma import measure_sigma, save_results_to_csv
+from measure_sigma import measure_sigma_with_sample_temperature, save_results_to_csv
 from seebeck_measurement import SeebeckMeasurement
 from run_sigma import save_sigma_vs_temp
 from run_seebeck import save_seebeck_vs_temp
@@ -120,17 +120,21 @@ def run_single_combined(
                     verbose=True,
                     logger=temp_logger
                 )
+                if sigma_results:
+                    sigma_results['temperature'] = current_temp  # simulated sample reading
             else:
-                sigma_results = measure_sigma(
+                # Sample temperature averaged over σ (ch 111, read between iterations)
+                sigma_results = measure_sigma_with_sample_temperature(
+                    read_current_temperature,
+                    readings=[current_temp],
                     sample_t=thickness,
                     sample_dia=diameter,
                     verbose=True,
                     logger=temp_logger
                 )
-            
+
             if sigma_results:
-                sigma_results['temperature'] = current_temp
-                
+
                 # Save individual measurement
                 save_results_to_csv(sigma_results, f"{sample_name}_{int(current_temp)}C", str(sigma_folder))
                 
@@ -172,7 +176,8 @@ def run_single_combined(
                 logger=temp_logger
             )
             
-            seebeck_results['temperature'] = current_temp
+            # Sample temperature: mean of every T1 and T2 reading of the run
+            seebeck_results['temperature'] = seebeck_results['T_avg']
             
             print(f"\n✅ SEEBECK: {seebeck_results['Seebeck']:.2f} µV/K")
             global_logger.info(f"SEEBECK: {seebeck_results['Seebeck']:.2f} µV/K")
@@ -333,8 +338,12 @@ def run_combined_temperature_sweep(
                         verbose=True,
                         logger=temp_logger
                     )
+                    if sigma_results:
+                        sigma_results['temperature'] = actual_temp  # simulated sample reading
                 else:
-                    sigma_results = measure_sigma(
+                    # Sample temperature averaged over σ (ch 111)
+                    sigma_results = measure_sigma_with_sample_temperature(
+                        read_current_temperature,
                         sample_t=thickness,
                         sample_dia=diameter,
                         verbose=True,
@@ -457,7 +466,7 @@ def print_summary(sample_name: str, sigma_results: list, seebeck_results: list):
     print("\n" + "="*80)
     print(f"MEASUREMENT SUMMARY - {sample_name}")
     print("="*80)
-    print(f"{'Temp (°C)':<12} {'Sigma (S/cm)':<18} {'Seebeck (µV/K)':<18}")
+    print(f"{'Set-point (°C)':<15} {'Sigma (S/cm)':<18} {'Seebeck (µV/K)':<18}")
     print("-"*80)
     
     for i, (sig, see) in enumerate(zip(sigma_results, seebeck_results)):
@@ -468,7 +477,7 @@ def print_summary(sample_name: str, sigma_results: list, seebeck_results: list):
         sigma_str = f"{sigma_val:.2e}" if not np.isnan(sigma_val) else "FAILED"
         seebeck_str = f"{seebeck_val:.2f}" if not np.isnan(seebeck_val) else "FAILED"
         
-        print(f"{temp:<12.0f} {sigma_str:<18} {seebeck_str:<18}")
+        print(f"{temp:<15.0f} {sigma_str:<18} {seebeck_str:<18}")
     
     print("="*80)
 

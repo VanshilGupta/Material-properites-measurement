@@ -46,9 +46,10 @@ from output_manager import (                                # noqa: E402
     finalize_logging,
 )
 from measure_sigma import (                                 # noqa: E402
-    TEMPERATURE_FAILED_TEXT, MeasurementAborted, measure_sigma,
-    save_results_to_csv, save_iteration_data_to_csv,
+    TEMPERATURE_FAILED_TEXT, MeasurementAborted,
+    measure_sigma_with_sample_temperature, save_iteration_data_to_csv,
 )
+from master_file import append_master_row, master_file_path  # noqa: E402
 from seebeck_measurement import SeebeckMeasurement           # noqa: E402
 from constants import is_valid_temperature, read_current_temperature  # noqa: E402
 
@@ -174,6 +175,29 @@ class _MeasurementWorker(QObject):
         file_logger.addHandler(qt_handler)
         return file_logger
 
+    def _append_master(self, config: dict, sample_folder: Path,
+                       sigma_results, seebeck_results,
+                       setpoint: Optional[float] = None):
+        """Add this point's σ and Seebeck results to the sample's master CSV.
+
+        A failed write (e.g. the file is open in Excel) is logged but never
+        stops the measurement — the raw data is still in the point's folders.
+        """
+        if not sigma_results and not seebeck_results:
+            return
+        path = master_file_path(sample_folder, config["sample_name"])
+        try:
+            append_master_row(
+                path, config["sample_name"],
+                sigma_results, seebeck_results, setpoint=setpoint,
+                thickness=config.get("thickness"),
+                diameter=config.get("diameter"),
+            )
+            self._log(f"Results added to master file → {path.name}")
+        except OSError as exc:
+            self._log(f"⚠ Could not write master file {path}: {exc} "
+                      "(close it if it is open in Excel)")
+
     def _set_instruments(self, state: str):
         """Emit status for both Power Supply and Multimeter."""
         self.instrument_status.emit(_INST_PS, state)
@@ -201,25 +225,32 @@ class _MeasurementWorker(QObject):
 
         try:
             self._log(f"Sample: {thickness} mm × {diameter} mm  |  5 VDP iterations")
-            # The σ data records the SAMPLE's temperature (DAQ ch 111), read
-            # just before σ starts — never the furnace's.
-            sample_temp = self._read_sample_temperature()
-            results = measure_sigma(
+            # The σ data records the SAMPLE's temperature (DAQ ch 111) — never
+            # the furnace's — averaged over the measurement: this reading
+            # (with retries) plus one after every VDP iteration.
+            start_temp = self._read_sample_temperature()
+            results = measure_sigma_with_sample_temperature(
+                read_current_temperature,
+                readings=[start_temp] if start_temp is not None else [],
+                progress_callback=_sigma_progress,
                 sample_t=thickness, sample_dia=diameter,
                 verbose=True, logger=temp_logger,
-                progress_callback=_sigma_progress,
             )
 
             if results:
-                results["temperature"] = sample_temp
-                if sample_temp is None:
-                    results["temperature_note"] = TEMPERATURE_FAILED_TEXT
-                save_results_to_csv(
-                    results,
-                    f"{sample_name}_{current_temp:.1f}C",
-                    str(sigma_folder),
-                )
-                # Save per-iteration CSV
+                sample_temps = results["temperature_readings"]
+                if sample_temps:
+                    self._log(
+                        f"σ sample temperature: {results['temperature']:.2f} °C  "
+                        f"(mean of {len(sample_temps)} readings, "
+                        f"{min(sample_temps):.1f}–{max(sample_temps):.1f} °C)"
+                    )
+                else:
+                    self._log("⚠ No sample temperature (ch 111) could be read "
+                              f"during σ — the data will say "
+                              f"'{TEMPERATURE_FAILED_TEXT}'")
+                # The σ summary goes into the master file (see
+                # _append_master); only the raw iterations are saved here.
                 save_iteration_data_to_csv(
                     results,
                     f"{sample_name}_{current_temp:.1f}C",
@@ -310,11 +341,13 @@ class _MeasurementWorker(QObject):
                 output_folder=str(seebeck_folder),
                 logger=temp_logger,
             )
-            results["temperature"] = current_temp
+            # Sample temperature: mean of every T₁ and T₂ reading of the run.
+            results["temperature"] = results["T_avg"]
 
             self._log(
                 f"S = {results['Seebeck']:.2f} µV/K  "
-                f"(R² = {results['adj_r_square']:.4f})  ✓"
+                f"(R² = {results['adj_r_square']:.4f})  at sample mean "
+                f"{results['T_avg']:.2f} °C  ✓"
             )
             global_logger.info(
                 f"SEEBECK completed: {results['Seebeck']:.2f} µV/K"
@@ -673,6 +706,10 @@ class _MeasurementWorker(QObject):
                     self._save_seebeck_fit_plot(
                         seebeck_folder, fname, seebeck_results)
 
+            # temp_folder sits directly inside the sample folder.
+            self._append_master(config, temp_folder.parent,
+                                sigma_results, seebeck_results)
+
             # ── Summary ──────────────────────────────────────────────────
             parts = []
             if sigma_results:
@@ -956,6 +993,10 @@ class _MeasurementWorker(QObject):
                 self._log(f"{point_label} Done: {point_summary}")
                 global_logger.info(f"{point_label} Done: {point_summary}")
 
+                self._append_master(config, sample_folder,
+                                    sigma_results, seebeck_results,
+                                    setpoint=target_temp)
+
                 self.cycle_point_completed.emit(actual_temp, sigma_results, seebeck_results, str(temp_folder))
 
                 finalize_logging(temp_logger, success=True)
@@ -1096,8 +1137,8 @@ class _MeasurementWorker(QObject):
             if attempt < _TEMP_READ_ATTEMPTS:
                 self._interruptible_sleep(_SAMPLE_TEMP_RETRY_S,
                                           "sample temperature retry")
-        self._log(f"⚠ Sample temperature (ch 111) could not be read — the σ "
-                  f"data will say '{TEMPERATURE_FAILED_TEXT}'")
+        self._log("⚠ Sample temperature (ch 111) could not be read before σ "
+                  "— it is read again after every σ iteration")
         return None
 
     def _furnace_reading(self, eurotherm):

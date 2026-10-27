@@ -578,6 +578,69 @@ def measure_sigma(sample_t=None, sample_dia=None, verbose=True, logger=None,
 TEMPERATURE_FAILED_TEXT = "Failed to record"
 
 
+def measure_sigma_with_sample_temperature(read_temperature, readings=None,
+                                          progress_callback=None, **kwargs):
+    """Run ``measure_sigma`` and record the SAMPLE's mean temperature.
+
+    The sample thermocouple is read before σ starts and again after every
+    VDP iteration — ``measure_sigma`` closes the DAQ after each reading, so
+    it is free then.  Each of those reads is a single try.
+
+    Parameters
+    ----------
+    read_temperature : callable
+        Returns the sample temperature in °C, or ``None`` if the read failed
+        (e.g. ``constants.read_current_temperature``).
+    readings : list[float] | None
+        Sample temperatures already taken just before σ.  If ``None``, one
+        reading is taken here.
+    progress_callback : callable | None
+        Passed on to ``measure_sigma``; called after the iteration's
+        temperature has been read.
+    **kwargs
+        Passed on to ``measure_sigma``.
+
+    Returns
+    -------
+    dict | None
+        ``measure_sigma``'s results plus ``'temperature'`` (mean of all
+        readings, or ``None`` with a ``'temperature_note'`` if none could be
+        read) and ``'temperature_readings'``.  Every iteration dict also gets
+        its own ``'temperature'``.
+    """
+    def _read():
+        try:
+            return read_temperature()
+        except MeasurementAborted:
+            raise
+        except Exception:
+            return None
+
+    if readings is None:
+        t = _read()
+        readings = [t] if t is not None else []
+    else:
+        readings = list(readings)
+
+    def _callback(iter_data):
+        t = _read()
+        iter_data['temperature'] = round(t, 1) if t is not None else None
+        if t is not None:
+            readings.append(t)
+        if progress_callback:
+            progress_callback(iter_data)
+
+    results = measure_sigma(progress_callback=_callback, **kwargs)
+    if results:
+        results['temperature_readings'] = readings
+        if readings:
+            results['temperature'] = round(sum(readings) / len(readings), 2)
+        else:
+            results['temperature'] = None
+            results['temperature_note'] = TEMPERATURE_FAILED_TEXT
+    return results
+
+
 def _result_temperature(results):
     """Return the measurement temperature (°C) as a CSV cell string.
 
@@ -691,12 +754,20 @@ def save_iteration_data_to_csv(results, sample_name, output_folder=None):
 
         temp_str = _result_temperature(results)
 
+        def _iter_temp(it):
+            # The GUI reads the sample temperature after every iteration;
+            # otherwise every row gets the measurement's temperature.
+            if "temperature" not in it:
+                return temp_str
+            t = it["temperature"]
+            return f"{t:.2f}" if t is not None else TEMPERATURE_FAILED_TEXT
+
         with open(filepath, "w", encoding="utf-8-sig") as f:
             f.write(",".join(headers) + "\n")
             for it in iterations:
                 row = [
                     str(it["iteration"]),
-                    temp_str,
+                    _iter_temp(it),
                     _fmt(it["v1"]), _fmt(it["v2"]),
                     _fmt(it["v3"]), _fmt(it["v4"]),
                     _fmt(it["delta_v1"]), _fmt(it["delta_v2"]),

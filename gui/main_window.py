@@ -35,7 +35,7 @@ from PySide6.QtWidgets import (
     QPushButton, QLabel, QStatusBar, QMessageBox,
     QApplication, QSplitter, QScrollArea, QToolTip,
     QDialog, QFrame, QGridLayout, QStackedWidget,
-    QFileDialog,
+    QFileDialog, QButtonGroup,
 )
 from PySide6.QtGui import QPixmap
 from PySide6.QtCore import QSettings
@@ -52,7 +52,6 @@ from gui.widgets import (
     LogPanel,
 )
 from gui.backend import EurothermService, MeasurementService
-from measure_sigma import TEMPERATURE_FAILED_TEXT
 
 _GUI_DIR   = pathlib.Path(__file__).resolve().parent
 _ROOT_DIR  = _GUI_DIR.parent
@@ -62,6 +61,39 @@ _LEFT_INITIAL_FRAC  = 0.50   # fraction of window width for left panel on startu
 _LEFT_MAX_FRAC      = 0.70   # splitter can go beyond but inputs stop growing here
 _LEFT_MIN_THRESHOLD = 200    # px — below this, auto-collapse kicks in
 _COLLAPSE_STRIP_W   = 28     # px — width of the always-visible arrow strip
+
+# Extra points after a Heating + Cooling cycle has come back down to its start
+# temperature.  The Eurotherm cools slowly, so stepping on below the start
+# (e.g. 25 → 24, 23 … 15 °C) gives the furnace time to actually get there.
+_COOL_TAIL_POINTS = 10
+_COOL_TAIL_STEP_C = 1.0
+
+
+def _cool_down_tail(start: float, stop: float, heating_only: bool) -> list[float]:
+    """Points appended after the cooling leg returns to *start*, else []."""
+    if heating_only or start >= stop:   # no cooling leg back down to start
+        return []
+    return [round(start - _COOL_TAIL_STEP_C * (i + 1), 1)
+            for i in range(_COOL_TAIL_POINTS)]
+
+
+def _cycle_temperatures(start: float, stop: float, step: float,
+                        heating_only: bool) -> list[float]:
+    """Target temperatures of a cycle, in measurement order.
+
+    start, start±step … stop (inclusive); with Heating + Cooling, back down
+    to start and then the cool-down tail (see ``_cool_down_tail``).
+    """
+    import numpy as np
+    if start <= stop:
+        temperatures = list(np.arange(start, stop + step * 0.01, step))
+    else:
+        temperatures = list(np.arange(start, stop - step * 0.01, -step))
+    # Append cooling leg if Heating + Cooling is selected
+    if not heating_only and len(temperatures) > 1:
+        temperatures.extend(reversed(temperatures[:-1]))
+        temperatures.extend(_cool_down_tail(start, stop, heating_only))
+    return [float(t) for t in temperatures]
 
 
 # ===========================================================================
@@ -169,6 +201,18 @@ class _MeasurementConfirmDialog(QDialog):
             self._add_row(cycle_grid, 2, "Step",      f"{t_cfg['step']:.0f} °C")
             self._add_row(cycle_grid, 3, "Ramp Rate", f"{t_cfg['rate']:.1f} °C/min")
             self._add_row(cycle_grid, 4, "Direction", direction)
+            tail = _cool_down_tail(t_cfg["start_temp"], t_cfg["stop_temp"],
+                                   m_cfg["heating_only"])
+            if tail:
+                self._add_row(
+                    cycle_grid, 5, "Cool-down",
+                    f"{tail[0]:g} → {tail[-1]:g} °C  "
+                    f"({len(tail)} points, {_COOL_TAIL_STEP_C:g} °C apart)",
+                )
+            n_points = len(_cycle_temperatures(
+                t_cfg["start_temp"], t_cfg["stop_temp"], t_cfg["step"],
+                m_cfg["heating_only"]))
+            self._add_row(cycle_grid, 6, "Points", f"{n_points} in total")
             mode_col.addLayout(cycle_grid)
         else:
             mode_col.addWidget(
@@ -716,7 +760,7 @@ class MainWindow(QMainWindow):
 
         self.graph_sigma_vs_temp = GraphPanel(
             title="Conductivity vs Temperature",
-            x_label="Temperature", y_label="\u03c3",
+            x_label="Sample Temperature", y_label="\u03c3",
             x_unit="\u00b0C", y_unit="S/cm",
             curves=[("\u03c3 vs T", "#4EC94E")],
         )
@@ -759,7 +803,7 @@ class MainWindow(QMainWindow):
         )
         self.graph_seebeck_vs_temp = GraphPanel(
             title="Seebeck vs Temperature",
-            x_label="Temperature", y_label="Seebeck Coefficient",
+            x_label="Sample Temperature", y_label="Seebeck Coefficient",
             x_unit="\u00b0C", y_unit="\u00b5V/K",
             curves=[("S vs T", "#F0A500")],
         )
@@ -797,6 +841,42 @@ class MainWindow(QMainWindow):
 
         seebeck_vl.addWidget(self.seebeck_graph_splitter, stretch=1)
         self.graph_stack.addWidget(seebeck_view)  # index 2
+
+        # ─── σ / Seebeck view switcher ──────────────────────────────
+        # Shown only for runs that measure both.  The view still follows
+        # the running measurement (see _on_phase_changed); these buttons
+        # let the operator look at the other one meanwhile.  Both views
+        # keep plotting whether or not they are shown.
+        self._graph_switch_row = QWidget()
+        switch_hl = QHBoxLayout(self._graph_switch_row)
+        switch_hl.setContentsMargins(8, 6, 8, 6)
+        switch_toggle = QWidget()
+        switch_toggle.setObjectName("SegmentedToggle")
+        switch_toggle.setMaximumWidth(360)
+        toggle_hl = QHBoxLayout(switch_toggle)
+        toggle_hl.setContentsMargins(3, 3, 3, 3)
+        toggle_hl.setSpacing(2)
+
+        self._graph_switch_btns = {}
+        self._graph_switch_group = QButtonGroup(self)
+        self._graph_switch_group.setExclusive(True)
+        for page, text in ((1, "σ  Conductivity"), (2, "Seebeck")):
+            btn = QPushButton(text)
+            btn.setObjectName("SegmentBtn")
+            btn.setCheckable(True)
+            btn.setCursor(Qt.PointingHandCursor)
+            self._graph_switch_group.addButton(btn, page)
+            self._graph_switch_btns[page] = (btn, text)
+            toggle_hl.addWidget(btn, stretch=1)
+        self._graph_switch_group.idClicked.connect(self.graph_stack.setCurrentIndex)
+        self.graph_stack.currentChanged.connect(self._sync_graph_switch)
+
+        # Centred; takes most of a narrow panel, capped at 360 px on wide ones.
+        switch_hl.addStretch(1)
+        switch_hl.addWidget(switch_toggle, stretch=4)
+        switch_hl.addStretch(1)
+        self._graph_switch_row.setVisible(False)
+        right_vl.addWidget(self._graph_switch_row)
 
         right_vl.addWidget(self.graph_stack, stretch=1)
 
@@ -1099,6 +1179,10 @@ class MainWindow(QMainWindow):
             f"Starting — {name}  |  {', '.join(meas_names)} at {mode_info}"
         )
         self._set_running(True)
+        # With both measured, the view switches between them automatically;
+        # the switcher lets the operator see the other one meanwhile.  It
+        # stays up after the run so both results can be browsed.
+        self._graph_switch_row.setVisible(len(meas_names) == 2)
 
         # Resolve seebeck experiment time (testing mode or default)
         if m_cfg.get("testing_mode", False):
@@ -1128,22 +1212,11 @@ class MainWindow(QMainWindow):
 
         # Cycle mode: generate temperature list and add cycle params
         if m_cfg["cycle_mode"]:
-            import numpy as np
-            start = t_cfg["start_temp"]
-            stop  = t_cfg["stop_temp"]
-            step  = t_cfg["step"]
-            # Generate list: start, start+step, ..., up to stop (inclusive)
-            if start <= stop:
-                temperatures = list(np.arange(start, stop + step * 0.01, step))
-            else:
-                temperatures = list(np.arange(start, stop - step * 0.01, -step))
-            # Append cooling leg if Heating + Cooling is selected
-            if not m_cfg["heating_only"] and len(temperatures) > 1:
-                cooling = list(reversed(temperatures[:-1]))
-                temperatures.extend(cooling)
-
             config["cycle_mode"]      = True
-            config["temperatures"]    = [float(t) for t in temperatures]
+            config["temperatures"]    = _cycle_temperatures(
+                t_cfg["start_temp"], t_cfg["stop_temp"], t_cfg["step"],
+                m_cfg["heating_only"],
+            )
             config["rate"]            = t_cfg["rate"]
             config["stability_time"]  = stability_time
             config["heating_only"]    = m_cfg["heating_only"]
@@ -1165,6 +1238,7 @@ class MainWindow(QMainWindow):
     def _on_measurement_finished(self, success: bool, summary: str, metadata: dict):
         """Called when the measurement worker finishes (success or abort)."""
         self._set_running(False)
+        self._mark_live_graph(None)
 
         # Auto-export summary if we just finished a cycle
         if success and self.method_panel.is_cycle_mode():
@@ -1216,8 +1290,8 @@ class MainWindow(QMainWindow):
     def _on_cycle_point_completed(self, actual_temp: float, sigma_res: dict, seebeck_res: dict, folder_path: str = ""):
         if sigma_res:
             corr = sigma_res.get("corr_sigma", 0.0)
-            # \u03c3 is plotted against the SAMPLE temperature (DAQ ch 111) read
-            # for that measurement; None means it failed to record.
+            # \u03c3 is plotted against the SAMPLE temperature (DAQ ch 111),
+            # averaged over the measurement; None means it failed to record.
             sample_t = sigma_res.get("temperature")
             self._summary_sigma.append((sample_t, corr))
             if sample_t is not None:
@@ -1233,49 +1307,41 @@ class MainWindow(QMainWindow):
                 self.graph_sigma_iter.save_clean_png(os.path.join(folder_path, "Sigma", "sigma_iterations.png"))
         if seebeck_res:
             sb = seebeck_res.get("Seebeck", 0.0)
-            self._summary_seebeck.append((actual_temp, sb))
-            self.graph_seebeck_vs_temp.append_to("S vs T", actual_temp, sb)
+            # S is plotted against the sample's mean temperature (all T₁
+            # and T₂ readings of the run), not the furnace reading.
+            sample_t = seebeck_res["T_avg"]
+            self._summary_seebeck.append((sample_t, sb))
+            self.graph_seebeck_vs_temp.append_to("S vs T", sample_t, sb)
             self.graph_seebeck_vs_temp._plot.autoRange()
 
     def _export_cycle_summary(self, dir_path: str):
-        import traceback, csv, os
+        # The numbers are already in the sample's master CSV (written point
+        # by point by the measurement worker); only the plots are made here.
+        import traceback, os
         try:
             name = self.sample_panel.get_sample_name()
             if self._summary_sigma:
-                # The graph needs a temperature; the CSV keeps every point.
+                # The graph needs a temperature; the master CSV keeps every point.
                 temps = [t for t, _ in self._summary_sigma if t is not None]
                 vals  = [s for t, s in self._summary_sigma if t is not None]
-                csv_path = os.path.join(dir_path, f"{name}_Sigma_vs_Temp.csv")
-                with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
-                    writer = csv.writer(f)
-                    writer.writerow(["Sample Temperature (°C)", "Conductivity (S/cm)"])
-                    for t, s in self._summary_sigma:
-                        t_cell = f"{t:.2f}" if t is not None else TEMPERATURE_FAILED_TEXT
-                        writer.writerow([t_cell, f"{s:.6e}"])
                 png_path = os.path.join(dir_path, f"{name}_Sigma_vs_Temp.png")
                 self._export_matplotlib_png(
                     temps, vals, png_path,
                     "Conductivity vs Temperature",
-                    "Temperature (\u00b0C)", "Conductivity (S/cm)", "green"
+                    "Sample Temperature (\u00b0C)", "Conductivity (S/cm)", "green"
                 )
 
             if self._summary_seebeck:
                 temps = [t for t, _ in self._summary_seebeck]
                 vals  = [s for _, s in self._summary_seebeck]
-                csv_path = os.path.join(dir_path, f"{name}_Seebeck_vs_Temp.csv")
-                with open(csv_path, "w", newline="") as f:
-                    writer = csv.writer(f)
-                    writer.writerow(["Temperature (°C)", "Seebeck Coefficient (µV/K)"])
-                    for t, s in self._summary_seebeck:
-                        writer.writerow([f"{t:.2f}", f"{s:.6f}"])
                 png_path = os.path.join(dir_path, f"{name}_Seebeck_vs_Temp.png")
                 self._export_matplotlib_png(
                     temps, vals, png_path,
                     "Seebeck vs Temperature",
-                    "Temperature (\u00b0C)", "Seebeck Coefficient (\u00b5V/K)", "orange"
+                    "Sample Temperature (\u00b0C)", "Seebeck Coefficient (\u00b5V/K)", "orange"
                 )
 
-            self.log_panel.append(f"\u2714 Saved cycle summary graphs and CSVs to {dir_path}")
+            self.log_panel.append(f"\u2714 Saved cycle summary graphs to {dir_path}")
         except Exception as e:
             self.log_panel.append(f"\u26a0 Failed to export cycle summary: {e}")
             print(traceback.format_exc())
@@ -1374,6 +1440,18 @@ class MainWindow(QMainWindow):
         elif phase == "seebeck":
             self.graph_stack.setCurrentIndex(2)
         # 'idle' keeps the current view so results remain visible
+        self._mark_live_graph({"sigma": 1, "seebeck": 2}.get(phase))
+
+    def _sync_graph_switch(self, page: int):
+        """Keep the σ / Seebeck switcher on the page being shown."""
+        entry = self._graph_switch_btns.get(page)
+        if entry:
+            entry[0].setChecked(True)
+
+    def _mark_live_graph(self, live_page):
+        """Put a ● on the switcher button of the measurement now running."""
+        for page, (btn, text) in self._graph_switch_btns.items():
+            btn.setText(f"●  {text}" if page == live_page else text)
 
     def _update_graph_placeholder(self, *_):
         """Update placeholder text based on measurement selection."""

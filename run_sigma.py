@@ -15,7 +15,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from pathlib import Path
 
-from measure_sigma import measure_sigma, save_results_to_csv
+from measure_sigma import measure_sigma_with_sample_temperature, save_results_to_csv
 from constants import (
     DEFAULT_SAMPLE_THICKNESS, 
     DEFAULT_SAMPLE_DIAMETER,
@@ -92,18 +92,25 @@ def run_single_sigma(sample_name: str, thickness: float, diameter: float):
                 verbose=True,
                 logger=temp_logger
             )
+            if results:
+                results['temperature'] = current_temp  # simulated sample reading
         else:
-            results = measure_sigma(
-                sample_t=thickness, 
-                sample_dia=diameter, 
+            # Sample temperature averaged over σ (ch 111, read between iterations)
+            results = measure_sigma_with_sample_temperature(
+                read_current_temperature,
+                readings=[current_temp],
+                sample_t=thickness,
+                sample_dia=diameter,
                 verbose=True,
                 logger=temp_logger
             )
-        
+
         if results:
             print("\n" + "="*60)
             print("MEASUREMENT COMPLETE")
             print("="*60)
+            if results.get('temperature') is not None:
+                print(f"Sample Temperature (mean): {results['temperature']:.2f}°C")
             print(f"Electrical Conductivity: {results['corr_sigma']:.2e} S/cm")
             print(f"Valid Measurements: {results['valid_count']}/5")
             print(f"Data saved to: {sigma_folder}")
@@ -241,23 +248,30 @@ def run_sigma_temperature_sweep(
                         verbose=True,
                         logger=temp_logger
                     )
+                    if results:
+                        results['temperature'] = actual_temp  # simulated sample reading
                 else:
-                    results = measure_sigma(
+                    # Sample temperature averaged over σ (ch 111)
+                    results = measure_sigma_with_sample_temperature(
+                        read_current_temperature,
                         sample_t=thickness,
                         sample_dia=diameter,
                         verbose=True,
                         logger=temp_logger
                     )
-                
+
                 if results:
                     results['target_temp'] = target_temp
                     results['actual_temp'] = actual_temp
                     all_results.append(results)
-                    
+
                     # Save individual measurement
                     save_results_to_csv(results, f"{sample_name}_{int(target_temp)}C", str(sigma_folder))
-                    
-                    global_logger.info(f"COMPLETED {target_temp}°C: Sigma = {results['corr_sigma']:.2e} S/cm")
+
+                    sample_t = results.get('temperature')
+                    sample_str = f"{sample_t:.2f}°C" if sample_t is not None else "failed to record"
+                    global_logger.info(f"COMPLETED {target_temp}°C: Sigma = {results['corr_sigma']:.2e} S/cm "
+                                       f"(sample temperature {sample_str})")
                     temp_logger.info(f"Electrical Conductivity: {results['corr_sigma']:.2e} S/cm")
                     finalize_logging(temp_logger, success=True)
                 else:
@@ -321,27 +335,30 @@ def save_sigma_vs_temp(sample_folder: Path, sample_name: str, results: list):
     data = {
         'Target_Temp_C': [r.get('target_temp', np.nan) for r in results],
         'Actual_Temp_C': [r.get('actual_temp', np.nan) for r in results],
+        # Mean sample temperature during σ (None = failed to record)
+        'Sample_Temp_C': [np.nan if r.get('temperature') is None else r['temperature']
+                          for r in results],
         'Sigma_S_cm': [r.get('corr_sigma', np.nan) for r in results],
         'Sigma_uncorr_S_cm': [r.get('uncorr_sigma', np.nan) for r in results],
         'Valid_Count': [r.get('valid_count', np.nan) for r in results]
     }
-    
+
     df = pd.DataFrame(data)
-    
+
     # Save to CSV
     csv_path = sample_folder / f"{sample_name}_Sigma_vs_Temp.csv"
     df.to_csv(csv_path, index=False)
     print(f"Saved: {csv_path}")
-    
-    # Create plot
+
+    # Create plot — against the SAMPLE temperature; points without one are left off
     fig, ax = plt.subplots(figsize=(10, 6))
-    valid = ~np.isnan(data['Sigma_S_cm'])
-    
+    valid = ~np.isnan(data['Sigma_S_cm']) & ~np.isnan(data['Sample_Temp_C'])
+
     if any(valid):
-        temps = np.array(data['Target_Temp_C'])[valid]
+        temps = np.array(data['Sample_Temp_C'])[valid]
         sigma = np.array(data['Sigma_S_cm'])[valid]
         ax.semilogy(temps, sigma, 'o-', markersize=8, linewidth=2)
-    ax.set_xlabel('Temperature (°C)', fontsize=12, fontweight='bold')
+    ax.set_xlabel('Sample Temperature (°C)', fontsize=12, fontweight='bold')
     ax.set_ylabel('Electrical Conductivity (S/cm)', fontsize=12, fontweight='bold')
     ax.set_title(f'{sample_name} - Sigma vs Temperature', fontsize=14, fontweight='bold')
     ax.grid(True, alpha=0.3, which='both')
