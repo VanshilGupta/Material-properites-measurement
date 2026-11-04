@@ -88,12 +88,15 @@ def run_single_seebeck(sample_name: str, measurement_time: float = 480.0):
     try:
         temp_logger.info("Starting Seebeck measurement...")
         
-        results = measurement.run_measurement(
+        run_kw = dict(
             filename=sample_name,
             measurement_time=measurement_time,
             output_folder=str(seebeck_folder),
-            logger=temp_logger
+            logger=temp_logger,
         )
+        if is_simulation_mode():
+            run_kw["temperature"] = current_temp
+        results = measurement.run_measurement(**run_kw)
         
         print("\n" + "="*60)
         print("MEASUREMENT COMPLETE")
@@ -221,12 +224,15 @@ def run_seebeck_temperature_sweep(
             filename = f"{sample_name}_{int(target_temp)}C"
             
             try:
-                results = measurement.run_measurement(
+                run_kw = dict(
                     filename=filename,
                     measurement_time=measurement_time,
                     output_folder=str(seebeck_folder),
-                    logger=temp_logger
+                    logger=temp_logger,
                 )
+                if is_simulation_mode():
+                    run_kw["temperature"] = actual_temp
+                results = measurement.run_measurement(**run_kw)
                 
                 results['target_temp'] = target_temp
                 results['actual_temp'] = actual_temp

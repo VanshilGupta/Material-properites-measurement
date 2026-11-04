@@ -163,6 +163,28 @@ class MethodConfigPanel(QGroupBox):
         self._stability_time_row.setVisible(False)
         vbox.addWidget(self._stability_time_row)
 
+        # ── Simulation (no instruments) ──────────────────────────────────
+        sim_sep = QFrame()
+        sim_sep.setFrameShape(QFrame.Shape.HLine)
+        sim_sep.setStyleSheet("background: #404040; max-height: 1px;")
+        vbox.addWidget(sim_sep)
+
+        self.chk_simulation = QCheckBox("Simulation mode")
+        self.chk_simulation.setCursor(Qt.PointingHandCursor)
+        self.chk_simulation.setToolTip(
+            "Run without the furnace, power supply, or multimeter.\n"
+            "Generates realistic σ and Seebeck data and saves it in\n"
+            "the same files and graphs as a real measurement."
+        )
+        self.chk_simulation.stateChanged.connect(self._on_simulation_toggled)
+        self.chk_simulation.stateChanged.connect(self.settings_changed)
+        vbox.addWidget(self.chk_simulation)
+
+        self._sim_note = QLabel("No instruments — data is simulated")
+        self._sim_note.setStyleSheet("background: transparent; color: #E0A040;")
+        self._sim_note.setVisible(False)
+        vbox.addWidget(self._sim_note)
+
         # ── Testing Mode ─────────────────────────────────────────────────
         test_sep = QFrame()
         test_sep.setFrameShape(QFrame.Shape.HLine)
@@ -242,6 +264,9 @@ class MethodConfigPanel(QGroupBox):
         """Show or hide testing-mode parameters."""
         self._test_time_row.setVisible(bool(state))
 
+    def _on_simulation_toggled(self, state):
+        self._sim_note.setVisible(bool(state))
+
     # ── Public API ────────────────────────────────────────────────────────
 
     def is_cycle_mode(self) -> bool:
@@ -258,6 +283,7 @@ class MethodConfigPanel(QGroupBox):
             "measure_seebeck":      self.chk_seebeck.isChecked(),
             "measure_conductivity": self.chk_conductivity.isChecked(),
             "testing_mode":         self.chk_testing.isChecked(),
+            "simulation":           self.chk_simulation.isChecked(),
             "seebeck_time_min":     self.seebeck_time_spin.value(),
             "stability_time_min":   self.stability_time_spin.value(),
         }

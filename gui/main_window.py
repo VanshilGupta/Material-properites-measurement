@@ -68,6 +68,20 @@ _COLLAPSE_STRIP_W   = 28     # px — width of the always-visible arrow strip
 _COOL_TAIL_POINTS = 10
 _COOL_TAIL_STEP_C = 1.0
 
+# Cycle σ-vs-T and S-vs-T: heating leg in red, cooling leg in blue.
+_HEAT_COLOR = "#E53935"
+_COOL_COLOR = "#1E88E5"
+
+
+def _style_cycle_curves(panel) -> None:
+    """Larger dots so the heating (red) and cooling (blue) legs read clearly."""
+    for name, colour in (("Heating", _HEAT_COLOR), ("Cooling", _COOL_COLOR)):
+        curve = panel._named_curves[name]
+        curve.setSymbol("o")
+        curve.setSymbolSize(8)
+        curve.setSymbolBrush(colour)
+        curve.setSymbolPen(pg.mkPen("#FFFFFF", width=0.6))
+
 
 def _cool_down_tail(start: float, stop: float, heating_only: bool) -> list[float]:
     """Points appended after the cooling leg returns to *start*, else []."""
@@ -136,6 +150,16 @@ class _MeasurementConfirmDialog(QDialog):
             f"font-size: 11px; color: {TEXT_SECONDARY}; background: transparent;"
         )
         root.addWidget(sub_lbl)
+
+        if m_cfg.get("simulation"):
+            sim_lbl = QLabel("SIMULATION — furnace and instruments will not be used")
+            sim_lbl.setWordWrap(True)
+            sim_lbl.setStyleSheet(
+                "font-size: 12px; font-weight: bold; color: #E0A040; "
+                "background: transparent; padding-top: 8px;"
+            )
+            root.addWidget(sim_lbl)
+
         root.addSpacing(18)
 
         # ── SAMPLE ────────────────────────────────────────────────
@@ -151,7 +175,10 @@ class _MeasurementConfirmDialog(QDialog):
         root.addSpacing(16)
 
         # ── TEMPERATURE ───────────────────────────────────────────
-        if current_temp is not None:
+        show_temp = current_temp is not None or (
+            m_cfg.get("simulation") and not m_cfg["cycle_mode"]
+        )
+        if show_temp:
             root.addWidget(self._make_section_label("TEMPERATURE"))
             temp_col = QVBoxLayout()
             temp_col.setContentsMargins(0, 6, 0, 0)
@@ -164,6 +191,10 @@ class _MeasurementConfirmDialog(QDialog):
                 temps = list(range(int(start), int(stop) + 1, step)) if step > 0 else [int(start)]
                 temp_str = ", ".join(f"{t} °C" for t in temps)
                 temp_col.addWidget(self._make_value_label(f"▸  {temp_str}"))
+            elif m_cfg.get("simulation"):
+                temp_col.addWidget(
+                    self._make_value_label("▸  Simulated, about 25 °C")
+                )
             else:
                 temp_col.addWidget(
                     self._make_value_label(f"▸  {current_temp:.1f} °C  (current)")
@@ -365,6 +396,9 @@ class _MeasurementSummaryDialog(QDialog):
                 self._add_row(details_grid, row, "Temperature",
                               f"{meta['temperature']:.1f} \u00b0C")
                 row += 1
+            if meta.get("simulation"):
+                self._add_row(details_grid, row, "Mode", "Simulation")
+                row += 1
             if meta.get("sigma_elapsed", 0) > 0:
                 self._add_row(details_grid, row, "\u03c3 time",
                               f"{meta['sigma_elapsed']:.1f} s")
@@ -485,8 +519,14 @@ class MainWindow(QMainWindow):
         # Summary data for cycle mode (Seebeck vs Temp, Sigma vs Temp)
         # Each list stores (temp, value) tuples so they stay aligned even
         # when one measurement type fails at a particular temperature.
-        self._summary_sigma: list[tuple[float, float]] = []
-        self._summary_seebeck: list[tuple[float, float]] = []
+        self._summary_sigma: list[tuple[float | None, float, bool]] = []
+        self._summary_seebeck: list[tuple[float | None, float, bool]] = []
+        self._cycle_targets: list[float] = []
+        self._cycle_point_index = 0
+        # Live per-point graphs stay on screen through the next ramp and are
+        # cleared on the first new point of that measurement, not before.
+        self._clear_sigma_on_next_point = False
+        self._clear_seebeck_on_next_point = False
 
         # Build
         self._build_top_bar()
@@ -762,11 +802,9 @@ class MainWindow(QMainWindow):
             title="Conductivity vs Temperature",
             x_label="Sample Temperature", y_label="\u03c3",
             x_unit="\u00b0C", y_unit="S/cm",
-            curves=[("\u03c3 vs T", "#4EC94E")],
+            curves=[("Heating", _HEAT_COLOR), ("Cooling", _COOL_COLOR)],
         )
-        c2 = self.graph_sigma_vs_temp._named_curves["\u03c3 vs T"]
-        c2.setSymbol("o")
-        c2.setSymbolBrush("#4EC94E")
+        _style_cycle_curves(self.graph_sigma_vs_temp)
         
         self.sigma_graph_splitter.addWidget(self.graph_sigma_iter)
         self.sigma_graph_splitter.addWidget(self.graph_sigma_vs_temp)
@@ -805,11 +843,9 @@ class MainWindow(QMainWindow):
             title="Seebeck vs Temperature",
             x_label="Sample Temperature", y_label="Seebeck Coefficient",
             x_unit="\u00b0C", y_unit="\u00b5V/K",
-            curves=[("S vs T", "#F0A500")],
+            curves=[("Heating", _HEAT_COLOR), ("Cooling", _COOL_COLOR)],
         )
-        c3 = self.graph_seebeck_vs_temp._named_curves["S vs T"]
-        c3.setSymbol("o")
-        c3.setSymbolBrush("#F0A500")
+        _style_cycle_curves(self.graph_seebeck_vs_temp)
         # V₁ vs V₂ fit graph — created now, added to splitter at seebeck end
         self.graph_fit = GraphPanel(
             title="V\u2081 vs V\u2082   (Seebeck Fit)",
@@ -1177,6 +1213,7 @@ class MainWindow(QMainWindow):
         )
         self.log_panel.append(
             f"Starting — {name}  |  {', '.join(meas_names)} at {mode_info}"
+            + ("  |  SIMULATION" if m_cfg.get("simulation") else "")
         )
         self._set_running(True)
         # With both measured, the view switches between them automatically;
@@ -1202,11 +1239,14 @@ class MainWindow(QMainWindow):
             "measure_seebeck": m_cfg["measure_seebeck"],
             "seebeck_time":    seebeck_time,
             "base_dir":        self._output_dir,
+            "simulation":      bool(m_cfg.get("simulation")),
         }
 
         # Clear cycle summary graphs
         self._summary_seebeck.clear()
         self._summary_sigma.clear()
+        self._cycle_targets = []
+        self._cycle_point_index = 0
         self.graph_sigma_vs_temp.clear_data()
         self.graph_seebeck_vs_temp.clear_data()
 
@@ -1217,6 +1257,7 @@ class MainWindow(QMainWindow):
                 t_cfg["start_temp"], t_cfg["stop_temp"], t_cfg["step"],
                 m_cfg["heating_only"],
             )
+            self._cycle_targets = config["temperatures"]
             config["rate"]            = t_cfg["rate"]
             config["stability_time"]  = stability_time
             config["heating_only"]    = m_cfg["heating_only"]
@@ -1244,7 +1285,7 @@ class MainWindow(QMainWindow):
         if success and self.method_panel.is_cycle_mode():
             dp = metadata.get("data_path")
             if dp:
-                self._export_cycle_summary(dp)
+                self._export_cycle_summary(dp, log=False)
 
         if success:
             self.log_panel.append(f"\u2714  {summary}")
@@ -1271,6 +1312,8 @@ class MainWindow(QMainWindow):
 
         # Clear graphs at the start of a new run so old data doesn't persist.
         if running:
+            self._clear_sigma_on_next_point = False
+            self._clear_seebeck_on_next_point = False
             self.graph_sigma_iter.clear_data()
             self.graph_seebeck_t.clear_data()
             self.graph_seebeck_v.clear_data()
@@ -1280,22 +1323,46 @@ class MainWindow(QMainWindow):
                 self.graph_fit.setParent(None)
                 self._fit_graph_added = False
 
+    def _point_is_heating(self) -> bool:
+        """True when this cycle point is on the way up, false on the way down.
+
+        The first point follows the direction of the step after it. A
+        heating-only run that climbs is entirely red; one that descends is blue.
+        """
+        targets = self._cycle_targets
+        i = self._cycle_point_index
+        if len(targets) < 2 or i < 0 or i >= len(targets):
+            return True
+        if i == 0:
+            return targets[1] >= targets[0]
+        return targets[i] >= targets[i - 1]
+
     def _on_cycle_point_starting(self, idx: int, tgt_temp: float):
-        self.graph_sigma_iter.clear_data()
-        self.graph_seebeck_t.clear_data()
-        self.graph_seebeck_v.clear_data()
-        self.graph_fit.clear_data()
-        # You could also update a section title to "Cycle [X/Y] - Z °C"
+        # Keep the previous point's traces up during the ramp. Each graph
+        # is cleared when its own new data actually arrives.
+        self._cycle_point_index = idx
+        self._clear_sigma_on_next_point = True
+        self._clear_seebeck_on_next_point = True
 
     def _on_cycle_point_completed(self, actual_temp: float, sigma_res: dict, seebeck_res: dict, folder_path: str = ""):
         if sigma_res:
             corr = sigma_res.get("corr_sigma", 0.0)
             # \u03c3 is plotted against the SAMPLE temperature (DAQ ch 111),
-            # averaged over the measurement; None means it failed to record.
+            # averaged over the measurement. A missing or zero reading is not
+            # a real sample temperature — use the temperature this point was
+            # measured at so the point is not stacked at 0 °C.
             sample_t = sigma_res.get("temperature")
-            self._summary_sigma.append((sample_t, corr))
+            try:
+                sample_t = float(sample_t)
+            except (TypeError, ValueError):
+                sample_t = None
+            if (sample_t is None or sample_t <= 0) and actual_temp > 0:
+                sample_t = float(actual_temp)
+            heating = self._point_is_heating()
+            self._summary_sigma.append((sample_t, corr, heating))
             if sample_t is not None:
-                self.graph_sigma_vs_temp.append_to("\u03c3 vs T", sample_t, corr)
+                leg = "Heating" if heating else "Cooling"
+                self.graph_sigma_vs_temp.append_to(leg, sample_t, corr)
                 self.graph_sigma_vs_temp._plot.autoRange()
             else:
                 self.log_panel.append(
@@ -1309,52 +1376,99 @@ class MainWindow(QMainWindow):
             sb = seebeck_res.get("Seebeck", 0.0)
             # S is plotted against the sample's mean temperature (all T₁
             # and T₂ readings of the run), not the furnace reading.
-            sample_t = seebeck_res["T_avg"]
-            self._summary_seebeck.append((sample_t, sb))
-            self.graph_seebeck_vs_temp.append_to("S vs T", sample_t, sb)
-            self.graph_seebeck_vs_temp._plot.autoRange()
+            sample_t = seebeck_res.get("T_avg")
+            try:
+                sample_t = float(sample_t)
+            except (TypeError, ValueError):
+                sample_t = None
+            if (sample_t is None or sample_t <= 0) and actual_temp > 0:
+                sample_t = float(actual_temp)
+            heating = self._point_is_heating()
+            self._summary_seebeck.append((sample_t, sb, heating))
+            if sample_t is not None:
+                leg = "Heating" if heating else "Cooling"
+                self.graph_seebeck_vs_temp.append_to(leg, sample_t, sb)
+                self.graph_seebeck_vs_temp._plot.autoRange()
 
-    def _export_cycle_summary(self, dir_path: str):
-        # The numbers are already in the sample's master CSV (written point
-        # by point by the measurement worker); only the plots are made here.
+        if folder_path:
+            from pathlib import Path
+            self._export_cycle_summary(str(Path(folder_path).parent))
+
+    def _export_cycle_summary(self, dir_path: str, *, log: bool = True):
+        # Rewritten after every temperature point (and once more at the end)
+        # so a stopped run still has σ vs T and S vs T for the points done.
         import traceback, os
         try:
             name = self.sample_panel.get_sample_name()
+            wrote = False
             if self._summary_sigma:
-                # The graph needs a temperature; the master CSV keeps every point.
-                temps = [t for t, _ in self._summary_sigma if t is not None]
-                vals  = [s for t, s in self._summary_sigma if t is not None]
-                png_path = os.path.join(dir_path, f"{name}_Sigma_vs_Temp.png")
-                self._export_matplotlib_png(
-                    temps, vals, png_path,
-                    "Conductivity vs Temperature",
-                    "Sample Temperature (\u00b0C)", "Conductivity (S/cm)", "green"
+                self._write_vs_temp_csv(
+                    os.path.join(dir_path, f"{name}_Sigma_vs_Temp.csv"),
+                    "Sample Temperature (°C)", "Corrected Sigma (S/cm)",
+                    self._summary_sigma,
                 )
+                self._export_vs_temp_png(
+                    os.path.join(dir_path, f"{name}_Sigma_vs_Temp.png"),
+                    "Conductivity vs Temperature",
+                    "Sample Temperature (\u00b0C)", "Conductivity (S/cm)",
+                    self._summary_sigma,
+                )
+                wrote = True
 
             if self._summary_seebeck:
-                temps = [t for t, _ in self._summary_seebeck]
-                vals  = [s for _, s in self._summary_seebeck]
-                png_path = os.path.join(dir_path, f"{name}_Seebeck_vs_Temp.png")
-                self._export_matplotlib_png(
-                    temps, vals, png_path,
-                    "Seebeck vs Temperature",
-                    "Sample Temperature (\u00b0C)", "Seebeck Coefficient (\u00b5V/K)", "orange"
+                self._write_vs_temp_csv(
+                    os.path.join(dir_path, f"{name}_Seebeck_vs_Temp.csv"),
+                    "Sample Temperature (°C)", "Seebeck Coefficient (µV/K)",
+                    self._summary_seebeck,
                 )
+                self._export_vs_temp_png(
+                    os.path.join(dir_path, f"{name}_Seebeck_vs_Temp.png"),
+                    "Seebeck vs Temperature",
+                    "Sample Temperature (\u00b0C)", "Seebeck Coefficient (\u00b5V/K)",
+                    self._summary_seebeck,
+                )
+                wrote = True
 
-            self.log_panel.append(f"\u2714 Saved cycle summary graphs to {dir_path}")
+            if log and wrote:
+                self.log_panel.append(f"\u2714 Updated \u03c3 vs T and S vs T \u2192 {dir_path}")
         except Exception as e:
-            self.log_panel.append(f"\u26a0 Failed to export cycle summary: {e}")
+            self.log_panel.append(f"\u26a0 Failed to update \u03c3 vs T / S vs T: {e}")
             print(traceback.format_exc())
 
-    def _export_matplotlib_png(self, x_data, y_data, path, title, xlabel, ylabel, color):
+    @staticmethod
+    def _write_vs_temp_csv(path, x_header, y_header, rows):
+        import csv
+        with open(path, "w", newline="", encoding="utf-8-sig") as fh:
+            writer = csv.writer(fh)
+            writer.writerow([x_header, y_header, "Leg"])
+            for temp, value, heating in rows:
+                if temp is None:
+                    continue
+                writer.writerow([
+                    f"{temp:.2f}", f"{value:.6e}",
+                    "Heating" if heating else "Cooling",
+                ])
+
+    def _export_vs_temp_png(self, path, title, xlabel, ylabel, rows):
         import matplotlib
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
+        heat = [(t, v) for t, v, heating in rows if t is not None and heating]
+        cool = [(t, v) for t, v, heating in rows if t is not None and not heating]
         fig, ax = plt.subplots(figsize=(8, 5))
-        ax.plot(x_data, y_data, marker='o', linestyle='-', color=color, linewidth=2, markersize=8)
-        ax.set_title(title, fontsize=14, fontweight='bold')
-        ax.set_xlabel(xlabel, fontsize=12, fontweight='bold')
-        ax.set_ylabel(ylabel, fontsize=12, fontweight='bold')
+        if heat:
+            ax.plot([t for t, _ in heat], [v for _, v in heat],
+                    marker="o", linestyle="-", color=_HEAT_COLOR,
+                    linewidth=2, markersize=8, label="Heating")
+        if cool:
+            ax.plot([t for t, _ in cool], [v for _, v in cool],
+                    marker="o", linestyle="-", color=_COOL_COLOR,
+                    linewidth=2, markersize=8, label="Cooling")
+        if heat or cool:
+            ax.legend()
+        ax.set_title(title, fontsize=14, fontweight="bold")
+        ax.set_xlabel(xlabel, fontsize=12, fontweight="bold")
+        ax.set_ylabel(ylabel, fontsize=12, fontweight="bold")
         ax.grid(True, alpha=0.3)
         fig.tight_layout()
         fig.savefig(path, dpi=200)
@@ -1364,6 +1478,10 @@ class MainWindow(QMainWindow):
 
     def _on_seebeck_data_point(self, data: dict):
         """Plot a new Seebeck data point on the live graphs."""
+        if self._clear_seebeck_on_next_point:
+            self.graph_seebeck_t.clear_data()
+            self.graph_seebeck_v.clear_data()
+            self._clear_seebeck_on_next_point = False
         t_min = data["time"] / 60.0  # seconds → minutes
         T1 = data["T1"]
         T2 = data["T2"]
@@ -1379,6 +1497,9 @@ class MainWindow(QMainWindow):
 
     def _on_sigma_data_point(self, data: dict):
         """Plot a new sigma data point on the conductivity graph."""
+        if self._clear_sigma_on_next_point:
+            self.graph_sigma_iter.clear_data()
+            self._clear_sigma_on_next_point = False
         iteration = data.get("iteration", 0)
         sigma = data.get("sigma", None)
         if sigma is not None and sigma > 0:
@@ -1400,6 +1521,8 @@ class MainWindow(QMainWindow):
     def _on_seebeck_fit_ready(self, data: dict):
         """Add the V₁ vs V₂ fit graph to the seebeck splitter."""
         import numpy as np
+        # Drop the previous point's fit at the moment the new one is drawn.
+        self.graph_fit.clear_data()
         v1 = np.array(data["V1"])  # already µV
         v2 = np.array(data["V2"])
         slope = data["slope"]

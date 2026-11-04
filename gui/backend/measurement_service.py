@@ -52,6 +52,12 @@ from measure_sigma import (                                 # noqa: E402
 from master_file import append_master_row, master_file_path  # noqa: E402
 from seebeck_measurement import SeebeckMeasurement           # noqa: E402
 from constants import is_valid_temperature, read_current_temperature  # noqa: E402
+from simulation import (                                     # noqa: E402
+    SimulatedSeebeckMeasurement,
+    simulate_eurotherm_ramp,
+    simulate_sigma_measurement,
+    simulate_temperature_reading,
+)
 
 # Instrument name constants (avoids duplicating literals).
 _INST_PS  = "Power Supply"
@@ -136,6 +142,8 @@ class _MeasurementWorker(QObject):
         # EurothermService that owns the single furnace connection; the
         # temperature cycle borrows its controller (see _acquire_furnace).
         self._furnace = furnace
+        # Set for the duration of a run started with config["simulation"].
+        self._simulation = False
 
     # ── public control ───────────────────────────────────────────────────
 
@@ -203,6 +211,17 @@ class _MeasurementWorker(QObject):
         self.instrument_status.emit(_INST_PS, state)
         self.instrument_status.emit(_INST_DAQ, state)
 
+    def _post_measurement_hold(self, which: str):
+        """Pause after a measurement. Real runs wait 10 s; simulation does not."""
+        if self._simulation:
+            self._log(f"Simulation: 10 s hold after {which} shortened")
+            self.status_message.emit(f"Simulation — hold after {which} …")
+            self._interruptible_sleep(0.25, f"post-{which} hold")
+        else:
+            self._log(f"Holding 10s after {which} measurement ...")
+            self.status_message.emit("Holding 10s ...")
+            self._interruptible_sleep(10.0, f"post-{which} hold")
+
     # ── sigma sub-routine ────────────────────────────────────────────────
 
     def _run_sigma(self, config: dict, current_temp: float,
@@ -225,17 +244,31 @@ class _MeasurementWorker(QObject):
 
         try:
             self._log(f"Sample: {thickness} mm × {diameter} mm  |  5 VDP iterations")
-            # The σ data records the SAMPLE's temperature (DAQ ch 111) — never
-            # the furnace's — averaged over the measurement: this reading
-            # (with retries) plus one after every VDP iteration.
-            start_temp = self._read_sample_temperature()
-            results = measure_sigma_with_sample_temperature(
-                read_current_temperature,
-                readings=[start_temp] if start_temp is not None else [],
-                progress_callback=_sigma_progress,
-                sample_t=thickness, sample_dia=diameter,
-                verbose=True, logger=temp_logger,
-            )
+            if config.get("simulation"):
+                # Same result schema as measure_sigma_with_sample_temperature:
+                # iterations (V1–V4), solved σ, and the sample-temperature mean.
+                self._log("Simulation: generating Van der Pauw voltages "
+                          "(power supply and multimeter not used)")
+                results = simulate_sigma_measurement(
+                    sample_t=thickness,
+                    sample_dia=diameter,
+                    temperature=current_temp,
+                    verbose=False,
+                    logger=temp_logger,
+                    progress_callback=_sigma_progress,
+                )
+            else:
+                # The σ data records the SAMPLE's temperature (DAQ ch 111) — never
+                # the furnace's — averaged over the measurement: this reading
+                # (with retries) plus one after every VDP iteration.
+                start_temp = self._read_sample_temperature()
+                results = measure_sigma_with_sample_temperature(
+                    read_current_temperature,
+                    readings=[start_temp] if start_temp is not None else [],
+                    progress_callback=_sigma_progress,
+                    sample_t=thickness, sample_dia=diameter,
+                    verbose=True, logger=temp_logger,
+                )
 
             if results:
                 sample_temps = results["temperature_readings"]
@@ -303,7 +336,12 @@ class _MeasurementWorker(QObject):
         self._log(f"Duration: {seebeck_time/60:.1f} min  |  File: {filename}")
 
         try:
-            measurement = SeebeckMeasurement(enable_plotting=False)
+            if config.get("simulation"):
+                self._log("Simulation: generating Seebeck time series "
+                          "(heaters and multimeter not used)")
+                measurement = SimulatedSeebeckMeasurement(enable_plotting=False)
+            else:
+                measurement = SeebeckMeasurement(enable_plotting=False)
 
             # Monkey-patch the plotter with a bridge that:
             #   1. Emits real-time data to the GUI graphs
@@ -335,12 +373,18 @@ class _MeasurementWorker(QObject):
 
             measurement.plotter = _QtPlotBridge()
 
-            results = measurement.run_measurement(
+            run_kwargs = dict(
                 filename=filename,
                 measurement_time=seebeck_time,
                 output_folder=str(seebeck_folder),
                 logger=temp_logger,
             )
+            # Real SeebeckMeasurement reads the sample temperature itself.
+            # The simulator needs the furnace temperature so T₁/T₂, the fit,
+            # and the master-file temperature all belong to this point.
+            if config.get("simulation"):
+                run_kwargs["temperature"] = current_temp
+            results = measurement.run_measurement(**run_kwargs)
             # Sample temperature: mean of every T₁ and T₂ reading of the run.
             results["temperature"] = results["T_avg"]
 
@@ -362,7 +406,8 @@ class _MeasurementWorker(QObject):
                     "V1": data_avg[:, 3].tolist(),   # V1 in µV
                     "V2": data_avg[:, 4].tolist(),   # V2 in µV
                     "slope": results.get("slope", 0),
-                    "intercept": results.get("offset", 0),
+                    # offset is the fit intercept in volts; the graph is in µV.
+                    "intercept": float(results.get("offset", 0)) * 1e6,
                     "adj_r_square": results.get("adj_r_square", 0),
                     "seebeck": results.get("Seebeck", 0),
                 })
@@ -554,7 +599,8 @@ class _MeasurementWorker(QObject):
             V1 = data_avg[:, 3]   # µV
             V2 = data_avg[:, 4]   # µV
             slope = results.get("slope", 0)
-            intercept = results.get("offset", 0)
+            # offset is volts; the plotted V₁/V₂ are µV.
+            intercept = float(results.get("offset", 0)) * 1e6
             adj_r2 = results.get("adj_r_square", 0)
             seebeck = results.get("Seebeck", 0)
 
@@ -613,7 +659,9 @@ class _MeasurementWorker(QObject):
             rate               : float  (cycle mode — ramp rate °C/min)
             stability_time     : float  (seconds — wait time per temp, default 1200)
             heating_only       : bool   (cycle mode — heat only or heat+cool)
+            simulation         : bool   (optional) — no instruments; realistic data
         """
+        self._simulation = bool(config.get("simulation", False))
         # Dispatch to cycle mode if requested
         if config.get("cycle_mode", False):
             return self._run_cycle(config)
@@ -636,22 +684,29 @@ class _MeasurementWorker(QObject):
 
         try:
             # ── Read current temperature ──────────────────────────────────
-            self._log("Reading current temperature …")
-            self.status_message.emit("Reading temperature …")
-            sources = [("DAQ thermocouple", read_current_temperature)]
-            furnace = self._connected_furnace()
-            if furnace is not None:
-                sources.append(("Eurotherm", furnace.read_temperature))
-            _current_temp, source = self._read_actual_temperature(sources)
-            if _current_temp is None:
-                _current_temp = 0.0   # keeps the summary dialog from showing one
-                raise RuntimeError(
-                    "Could not read the temperature from the DAQ thermocouple "
-                    "or the Eurotherm — measurement NOT started (no data "
-                    "would be recorded under a made-up temperature). Check "
-                    "the instruments and try again."
-                )
-            self._log(f"Current temperature: {_current_temp:.1f} °C  (from {source})")
+            if self._simulation:
+                self._log("SIMULATION MODE — furnace, power supply, and "
+                          "multimeter will not be contacted")
+                self.status_message.emit("Simulation — reading temperature …")
+                _current_temp = round(simulate_temperature_reading(), 1)
+                self._log(f"Current temperature: {_current_temp:.1f} °C  (simulated)")
+            else:
+                self._log("Reading current temperature …")
+                self.status_message.emit("Reading temperature …")
+                sources = [("DAQ thermocouple", read_current_temperature)]
+                furnace = self._connected_furnace()
+                if furnace is not None:
+                    sources.append(("Eurotherm", furnace.read_temperature))
+                _current_temp, source = self._read_actual_temperature(sources)
+                if _current_temp is None:
+                    _current_temp = 0.0   # keeps the summary dialog from showing one
+                    raise RuntimeError(
+                        "Could not read the temperature from the DAQ thermocouple "
+                        "or the Eurotherm — measurement NOT started (no data "
+                        "would be recorded under a made-up temperature). Check "
+                        "the instruments and try again."
+                    )
+                self._log(f"Current temperature: {_current_temp:.1f} °C  (from {source})")
 
             # Guard against invalid temperature for folder name
             if _current_temp <= 0:
@@ -679,9 +734,7 @@ class _MeasurementWorker(QObject):
                     self._save_sigma_iteration_plot(
                         sigma_folder, fname, sigma_results)
                 self._check_abort("post-sigma")
-                self._log("Holding 10s after \u03c3 measurement ...")
-                self.status_message.emit("Holding 10s ...")
-                self._interruptible_sleep(10.0, "post-sigma hold")
+                self._post_measurement_hold("\u03c3")
 
             if do_sigma and do_seebeck:
                 self._check_abort("between measurements")
@@ -694,9 +747,7 @@ class _MeasurementWorker(QObject):
                     temp_logger, global_logger)
                 _seebeck_elapsed = time.time() - _t0
                 self._check_abort("post-seebeck")
-                self._log("Holding 10s after Seebeck measurement ...")
-                self.status_message.emit("Holding 10s ...")
-                self._interruptible_sleep(10.0, "post-seebeck hold")
+                self._post_measurement_hold("Seebeck")
 
                 # Save all 3 Seebeck plots (time-series + fit)
                 if seebeck_results:
@@ -732,6 +783,7 @@ class _MeasurementWorker(QObject):
                 "sigma_elapsed": _sigma_elapsed,
                 "seebeck_elapsed": _seebeck_elapsed,
                 "total_elapsed": _total,
+                "simulation": self._simulation,
             }
             self.measurement_finished.emit(True, summary, metadata)
 
@@ -745,6 +797,7 @@ class _MeasurementWorker(QObject):
                 "temperature": _current_temp,
                 "data_path": _data_path,
                 "total_elapsed": time.time() - _t_run_start,
+                "simulation": self._simulation,
             })
 
         except Exception as exc:
@@ -757,6 +810,7 @@ class _MeasurementWorker(QObject):
                 "temperature": _current_temp,
                 "data_path": _data_path,
                 "total_elapsed": time.time() - _t_run_start,
+                "simulation": self._simulation,
             })
 
         finally:
@@ -839,7 +893,12 @@ class _MeasurementWorker(QObject):
             global_logger.info(f"Cycle: {temperatures}, rate={ramp_rate}, wait={stability_sec}s")
 
             # ── Borrow the shared Eurotherm connection ────────────────────
-            eurotherm = self._acquire_furnace(ramp_rate)
+            if self._simulation:
+                self._log("SIMULATION MODE — furnace, power supply, and "
+                          "multimeter will not be contacted")
+                eurotherm = None
+            else:
+                eurotherm = self._acquire_furnace(ramp_rate)
 
             # ── Loop over temperature points ─────────────────────────────
             skipped_targets: list[float] = []   # temperature unreadable
@@ -858,61 +917,82 @@ class _MeasurementWorker(QObject):
                 )
                 global_logger.info(f"{point_label} Target: {target_temp}°C")
 
-                # 1. Set setpoint
-                if eurotherm is not None:
-                    try:
-                        eurotherm.set_ramp_rate(ramp_rate)
-                        eurotherm.set_temperature(target_temp)
-                        self._log(f"Setpoint → {target_temp:.1f} °C  (ramp {ramp_rate} °C/min)")
-                    except Exception as exc:
-                        self._log(f"⚠ Failed to set temperature: {exc}")
-
-                # 2. Wait the expected ramp time plus a hold — 30 s at the
-                #    start point, stability_time at every later point — then
-                #    measure at whatever temperature the furnace has reached.
-                #    Ramp time is from the current reading (else the previous
-                #    point; at the start with no reading, just the hold).
-                from_temp = self._furnace_reading(eurotherm)
-                if from_temp is None and idx > 0:
-                    from_temp = temperatures[idx - 1]
-                ramp_sec = (abs(target_temp - from_temp) / max(ramp_rate, 0.1) * 60.0
-                            if from_temp is not None else 0.0)
-                self._countdown(ramp_sec,
-                                f"Cycle {point_label} — ramping to {target_temp:.1f} °C")
-                if idx == 0:
-                    self._countdown(_START_EXTRA_WAIT_S,
-                                    f"Cycle {point_label} — settling")
+                if self._simulation:
+                    # Accelerated ramp. The saved temperature is the reading a
+                    # stabilised furnace would give — near the set-point, not
+                    # the set-point copied in — and the long stability wait is
+                    # not slept.
+                    prev = temperatures[idx - 1] if idx else 25.0
+                    waited = (_START_EXTRA_WAIT_S if idx == 0 else stability_sec)
+                    self._log(
+                        f"Simulation: ramping {prev:.1f} → {target_temp:.1f} °C "
+                        f"at {ramp_rate:.1f} °C/min "
+                        f"(real hold would be {waited/60:.1f} min)"
+                    )
+                    self.status_message.emit(
+                        f"Cycle {point_label} — simulated ramp to {target_temp:.1f} °C"
+                    )
+                    actual_temp, _stable = simulate_eurotherm_ramp(
+                        prev, target_temp, ramp_rate,
+                    )
+                    actual_temp = round(float(actual_temp), 1)
+                    source = "simulation"
                 else:
-                    # Stabilisation is logged: once at the start, then every minute.
-                    self._countdown(stability_sec,
-                                    f"Cycle {point_label} — stabilising",
-                                    log_label="Stabilisation")
+                    # 1. Set setpoint
+                    if eurotherm is not None:
+                        try:
+                            eurotherm.set_ramp_rate(ramp_rate)
+                            eurotherm.set_temperature(target_temp)
+                            self._log(f"Setpoint → {target_temp:.1f} °C  (ramp {ramp_rate} °C/min)")
+                        except Exception as exc:
+                            self._log(f"⚠ Failed to set temperature: {exc}")
 
-                # 3. Read actual temperature — retry, but never substitute the
-                #    target or any other made-up value.
-                sources = []
-                if eurotherm is not None:
-                    sources.append(("Eurotherm", eurotherm.read_temperature))
-                sources.append(("DAQ thermocouple", read_current_temperature))
-                actual_temp, source = None, None
-                for attempt in range(1, _TEMP_READ_ATTEMPTS + 1):
-                    actual_temp, source = self._read_actual_temperature(sources)
-                    if actual_temp is not None:
-                        break
-                    if attempt < _TEMP_READ_ATTEMPTS:
-                        self._log(f"  Temperature unreadable — retrying in "
-                                  f"{_TEMP_RETRY_DELAY_S:.0f} s "
-                                  f"({attempt}/{_TEMP_READ_ATTEMPTS}) …")
-                        self._interruptible_sleep(_TEMP_RETRY_DELAY_S,
-                                                  "temperature retry")
+                    # 2. Wait the expected ramp time plus a hold — 30 s at the
+                    #    start point, stability_time at every later point — then
+                    #    measure at whatever temperature the furnace has reached.
+                    #    Ramp time is from the current reading (else the previous
+                    #    point; at the start with no reading, just the hold).
+                    from_temp = self._furnace_reading(eurotherm)
+                    if from_temp is None and idx > 0:
+                        from_temp = temperatures[idx - 1]
+                    ramp_sec = (abs(target_temp - from_temp) / max(ramp_rate, 0.1) * 60.0
+                                if from_temp is not None else 0.0)
+                    self._countdown(ramp_sec,
+                                    f"Cycle {point_label} — ramping to {target_temp:.1f} °C")
+                    if idx == 0:
+                        self._countdown(_START_EXTRA_WAIT_S,
+                                        f"Cycle {point_label} — settling")
+                    else:
+                        # Stabilisation is logged: once at the start, then every minute.
+                        self._countdown(stability_sec,
+                                        f"Cycle {point_label} — stabilising",
+                                        log_label="Stabilisation")
 
-                if actual_temp is None:
-                    msg = (f"{point_label} ✗ SKIPPED — could not read the actual "
-                           f"temperature (target {target_temp:.1f} °C); nothing "
-                           f"measured or saved for this point")
-                    global_logger.error(msg)   # also reaches the GUI log
-                    skipped_targets.append(target_temp)
-                    continue
+                    # 3. Read actual temperature — retry, but never substitute the
+                    #    target or any other made-up value.
+                    sources = []
+                    if eurotherm is not None:
+                        sources.append(("Eurotherm", eurotherm.read_temperature))
+                    sources.append(("DAQ thermocouple", read_current_temperature))
+                    actual_temp, source = None, None
+                    for attempt in range(1, _TEMP_READ_ATTEMPTS + 1):
+                        actual_temp, source = self._read_actual_temperature(sources)
+                        if actual_temp is not None:
+                            break
+                        if attempt < _TEMP_READ_ATTEMPTS:
+                            self._log(f"  Temperature unreadable — retrying in "
+                                      f"{_TEMP_RETRY_DELAY_S:.0f} s "
+                                      f"({attempt}/{_TEMP_READ_ATTEMPTS}) …")
+                            self._interruptible_sleep(_TEMP_RETRY_DELAY_S,
+                                                      "temperature retry")
+
+                    if actual_temp is None:
+                        msg = (f"{point_label} ✗ SKIPPED — could not read the actual "
+                               f"temperature (target {target_temp:.1f} °C); nothing "
+                               f"measured or saved for this point")
+                        global_logger.error(msg)   # also reaches the GUI log
+                        skipped_targets.append(target_temp)
+                        continue
 
                 self._log(f"Actual temperature: {actual_temp:.1f} °C  "
                           f"(from {source}; target was {target_temp:.1f} °C)")
@@ -958,9 +1038,7 @@ class _MeasurementWorker(QObject):
                         self._save_sigma_iteration_plot(
                             sigma_folder, fname, sigma_results)
                     self._check_abort("post-sigma")
-                    self._log("Holding 10s after \u03c3 measurement ...")
-                    self.status_message.emit("Holding 10s ...")
-                    self._interruptible_sleep(10.0, "post-sigma hold")
+                    self._post_measurement_hold("\u03c3")
 
                 if do_sigma and do_seebeck:
                     self._check_abort("between measurements")
@@ -971,9 +1049,7 @@ class _MeasurementWorker(QObject):
                         config, actual_temp, seebeck_folder,
                         temp_logger, global_logger)
                     self._check_abort("post-seebeck")
-                    self._log("Holding 10s after Seebeck measurement ...")
-                    self.status_message.emit("Holding 10s ...")
-                    self._interruptible_sleep(10.0, "post-seebeck hold")
+                    self._post_measurement_hold("Seebeck")
 
                     # Save all 3 Seebeck plots (time-series + fit)
                     if seebeck_results:
@@ -1028,6 +1104,7 @@ class _MeasurementWorker(QObject):
                 "total_elapsed": total,
                 "n_points": n_measured,
                 "skipped_targets": skipped_targets,
+                "simulation": self._simulation,
             })
 
         except MeasurementAborted:
@@ -1041,6 +1118,7 @@ class _MeasurementWorker(QObject):
             self.measurement_finished.emit(False, "Cycle aborted by user", {
                 "data_path": _data_path,
                 "total_elapsed": time.time() - _t_run_start,
+                "simulation": self._simulation,
             })
 
         except Exception as exc:
@@ -1054,6 +1132,7 @@ class _MeasurementWorker(QObject):
             self.measurement_finished.emit(False, str(exc), {
                 "data_path": _data_path,
                 "total_elapsed": time.time() - _t_run_start,
+                "simulation": self._simulation,
             })
 
         finally:
@@ -1069,6 +1148,9 @@ class _MeasurementWorker(QObject):
         restored first: after an abort the patched one raises, which would
         break the MODBUS write's inter-frame delay.
         """
+        if self._simulation:
+            self._log("Simulation: furnace setpoint was not changed")
+            return
         if eurotherm is None:
             return
         time.sleep = real_sleep

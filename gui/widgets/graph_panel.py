@@ -66,6 +66,10 @@ class GraphPanel(QWidget):
         self._y_unit  = y_unit
         self._curve_specs = curves  # [(name, colour), …] or None
         self._named_curves: dict[str, pg.PlotDataItem] = {}
+        # Our own (x, y) lists. Reading them back with PlotDataItem.getData()
+        # returns the widget's display copy, which is still zeros until the
+        # next redraw — appending onto that stacks every point at x = 0.
+        self._point_buffers: dict[str, tuple[list, list]] = {}
         self._build_ui()
 
     # ── Private builders ──────────────────────────────────────────────────
@@ -225,8 +229,12 @@ class GraphPanel(QWidget):
     def append_to(self, curve_name: str, x: float, y: float):
         """Add a data point to a named curve."""
         curve = self._named_curves.get(curve_name)
-        if curve is not None:
-            self._append_to_curve(curve, x, y)
+        if curve is None:
+            return
+        xs, ys = self._point_buffers.setdefault(curve_name, ([], []))
+        xs.append(float(x))
+        ys.append(float(y))
+        curve.setData(xs, ys)
 
     def set_data(self, x, y):
         """Replace the entire dataset of the default curve."""
@@ -259,6 +267,7 @@ class GraphPanel(QWidget):
 
     def clear_data(self):
         """Remove all plotted points, reference lines, from all curves."""
+        self._point_buffers.clear()
         self._curve.setData([], [])
         for c in self._named_curves.values():
             c.setData([], [])

@@ -169,12 +169,15 @@ def run_single_combined(
                 measurement = SeebeckMeasurement(enable_plotting=True)
             filename = f"{sample_name}_{int(current_temp)}C"
             
-            seebeck_results = measurement.run_measurement(
+            run_kw = dict(
                 filename=filename,
                 measurement_time=seebeck_time,
                 output_folder=str(seebeck_folder),
-                logger=temp_logger
+                logger=temp_logger,
             )
+            if is_simulation_mode():
+                run_kw["temperature"] = current_temp
+            seebeck_results = measurement.run_measurement(**run_kw)
             
             # Sample temperature: mean of every T1 and T2 reading of the run
             seebeck_results['temperature'] = seebeck_results['T_avg']
@@ -398,12 +401,15 @@ def run_combined_temperature_sweep(
                     measurement = SeebeckMeasurement(enable_plotting=True)
                 filename = f"{sample_name}_{int(target_temp)}C"
                 
-                seebeck_results = measurement.run_measurement(
+                run_kw = dict(
                     filename=filename,
                     measurement_time=seebeck_time,
                     output_folder=str(seebeck_folder),
-                    logger=temp_logger
+                    logger=temp_logger,
                 )
+                if is_simulation_mode():
+                    run_kw["temperature"] = actual_temp
+                seebeck_results = measurement.run_measurement(**run_kw)
                 
                 seebeck_results['target_temp'] = target_temp
                 seebeck_results['actual_temp'] = actual_temp

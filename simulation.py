@@ -1,42 +1,133 @@
 """
 Simulation Module for Sigma and Seebeck Measurements
 
-Provides simulated data for testing plotting and data saving
-without being connected to actual instruments.
+Generates data with the same keys, units, and files as a real run, without
+contacting the furnace, power supply, or multimeter.
+
+Sigma voltages are a noisy Van der Pauw measurement of a temperature-dependent
+conductivity, solved with the same equation the instrument code uses.
+Seebeck time series follow the real heater phases; V1 and V2 (volts) are built
+so the thermocouple-corrected fit recovers the model Seebeck coefficient.
+Saved CSVs use the real layouts (sigma iterations, ``*_all.csv``,
+``*_averaged.csv``).
 """
 
-import numpy as np
-import pandas as pd
-import time
+from __future__ import annotations
+
 import logging
-from pathlib import Path
-from typing import Dict, Optional, Tuple
-import matplotlib.pyplot as plt
+import time
+from typing import Callable, Dict, Optional, Tuple
+
+import numpy as np
+from scipy.optimize import brentq
+
+from constants import MEASUREMENT_CURRENT
+from seebeck_measurement.curve_fitting import (
+    calculate_thermocouple_seebeck,
+    fit_v1_v2_and_calculate_seebeck,
+)
+from seebeck_measurement.data_processing import save_to_csv
 
 
 # Simulation parameters (realistic ranges)
 SIM_PARAMS = {
-    # Sigma simulation
-    'sigma_base': 1e2,  # Base conductivity in S/cm
-    'sigma_noise': 0.05,  # 5% noise
-    'sigma_temp_coeff': 0.02,  # Temperature coefficient
-    
-    # Seebeck simulation
-    'seebeck_base': -150,  # Base Seebeck in µV/K (negative for n-type)
-    'seebeck_noise': 0.03,  # 3% noise
-    'seebeck_temp_coeff': 0.01,  # Temperature coefficient
-    
+    # Sigma simulation — about 100 S/cm at 25 °C, rising gently with temperature
+    'sigma_base': 1e2,          # S/cm
+    'sigma_noise': 0.02,        # fractional noise on each iteration
+    'sigma_temp_coeff': 0.004,  # per °C
+
+    # Seebeck simulation — n-type, µV/K
+    'seebeck_base': -150.0,
+    'seebeck_noise_v': 0.4e-6,  # volts, on V1 and V2
+    'seebeck_temp_coeff': 0.001,
+
     # Temperature simulation
     'room_temp': 25.0,
-    'temp_noise': 0.5,  # ±0.5°C noise
+    'temp_noise': 0.15,         # °C, sample-temperature scatter
 }
 
+# Wall-clock pauses so a GUI can paint live points. Real durations are
+# written into the data; these only pace the simulation.
+_SIGMA_PAUSE_S = 0.08
+_SEEBECK_PAUSE_S = 0.015
+_RAMP_PAUSE_S = 0.4
 
-def simulate_temperature_reading() -> float:
-    """Simulate reading current temperature from DAQ."""
-    base_temp = SIM_PARAMS['room_temp']
-    noise = np.random.normal(0, SIM_PARAMS['temp_noise'])
-    return base_temp + noise
+
+def nominal_sigma(temperature: float) -> float:
+    """Conductivity (S/cm) the sigma simulator is built around."""
+    factor = 1.0 + SIM_PARAMS['sigma_temp_coeff'] * (temperature - 25.0)
+    return SIM_PARAMS['sigma_base'] * max(factor, 0.2)
+
+
+def nominal_seebeck(temperature: float) -> float:
+    """Seebeck coefficient (µV/K) the seebeck simulator is built around."""
+    factor = 1.0 + SIM_PARAMS['seebeck_temp_coeff'] * (temperature - 25.0)
+    return SIM_PARAMS['seebeck_base'] * factor
+
+
+def _rng(seed: Optional[int]) -> np.random.Generator:
+    return np.random.default_rng(seed)
+
+
+def _geometry_error(diameter_mm: float) -> float:
+    """Same geometry correction ``measure_sigma`` applies."""
+    d1 = (diameter_mm - 9.0) / 2.0
+    return 4.0 * ((d1 ** 2) / (2.0 * diameter_mm ** 2 * np.log(2.0)))
+
+
+def solve_vdp_sigma(r1: float, r2: float, thickness_mm: float) -> float:
+    """Conductivity (S/cm) from the Van der Pauw equation, or 0 if unsolvable.
+
+    ``r1`` and ``r2`` are ohms, ``thickness_mm`` is millimetres.  This is the
+    same transcendental equation ``measure_sigma`` solves with Brent's method.
+    """
+    d_cm = thickness_mm / 10.0
+    if d_cm <= 0 or r1 <= 0 or r2 <= 0:
+        return 0.0
+
+    def vdp_equation(rho: float) -> float:
+        return (np.exp(-np.pi * r1 * d_cm / rho)
+                + np.exp(-np.pi * r2 * d_cm / rho)) - 1.0
+
+    rho_guess = np.pi * 0.5 * (r1 + r2) * d_cm / np.log(2.0)
+    bracket = None
+    for scale in (10, 100, 1000, 10000):
+        a, b = rho_guess / scale, rho_guess * scale
+        if vdp_equation(a) * vdp_equation(b) < 0:
+            bracket = (a, b)
+            break
+    if bracket is None:
+        a, b = 1e-8, 1e3
+        if vdp_equation(a) * vdp_equation(b) >= 0:
+            return 0.0
+        bracket = (a, b)
+    try:
+        rho = brentq(vdp_equation, bracket[0], bracket[1], xtol=1e-12, rtol=1e-10)
+    except ValueError:
+        return 0.0
+    if rho <= 0:
+        return 0.0
+    return float(1.0 / rho)
+
+
+def _vdp_slope(sample_seebeck_uV_K: float, temperature: float) -> float:
+    """V2-vs-V1 slope that the real fit turns back into ``sample_seebeck_uV_K``.
+
+    The instrument fit is::
+
+        S = S_TC / (1 - slope) + S_Alumel
+    """
+    s_chromel, s_alumel = calculate_thermocouple_seebeck(temperature)
+    s_tc = s_chromel - s_alumel
+    return 1.0 - s_tc / (sample_seebeck_uV_K - s_alumel)
+
+
+def simulate_temperature_reading(base: Optional[float] = None,
+                                 seed: Optional[int] = None) -> float:
+    """Simulate one sample-thermocouple reading (°C)."""
+    rng = _rng(seed)
+    center = SIM_PARAMS['room_temp'] if base is None else float(base)
+    return float(center + rng.normal(0, SIM_PARAMS['temp_noise']))
 
 
 def simulate_sigma_measurement(
@@ -44,119 +135,135 @@ def simulate_sigma_measurement(
     sample_dia: float,
     temperature: float = 25.0,
     verbose: bool = True,
-    logger: Optional[logging.Logger] = None
+    logger: Optional[logging.Logger] = None,
+    progress_callback: Optional[Callable[[dict], None]] = None,
+    seed: Optional[int] = None,
 ) -> Dict:
+    """Simulate a sigma measurement and return the real result schema.
+
+    The dict matches ``measure_sigma_with_sample_temperature``: per-iteration
+    V1–V4, resistances, solved conductivity, sample-temperature readings, and
+    the geometry-corrected median.  ``progress_callback`` is invoked once per
+    iteration with the same keys the GUI graphs consume.
     """
-    Simulate a sigma (electrical conductivity) measurement.
-    
-    Args:
-        sample_t: Sample thickness in mm
-        sample_dia: Sample diameter in mm
-        temperature: Current temperature in °C
-        verbose: Print progress
-        logger: Optional logger
-        
-    Returns:
-        Dictionary with simulated results
-    """
+    rng = _rng(seed)
     if verbose:
         print("\n[SIMULATION MODE] Sigma Measurement")
-        print(f"Sample: {sample_t}mm thick, {sample_dia}mm diameter")
-    
+        print(f"Sample: {sample_t} mm thick, {sample_dia} mm diameter")
     if logger:
         logger.info("[SIMULATION] Starting simulated sigma measurement")
-    
-    # Calculate sample area
-    area = np.pi * (sample_dia / 2) ** 2  # mm²
-    area_cm2 = area / 100  # cm²
-    thickness_cm = sample_t / 10  # cm
-    
-    # Simulate temperature-dependent conductivity
-    temp_factor = 1 + SIM_PARAMS['sigma_temp_coeff'] * (temperature - 25)
-    base_sigma = SIM_PARAMS['sigma_base'] * temp_factor
-    
-    # Simulate 5 measurement cycles with noise
-    measurements = []
-    resistances = []
-    sigma_raw = np.zeros(5)  # Array to store raw sigma values
-    currents = [0.001, 0.002, 0.005, 0.010, 0.020]  # Typical current values in A
-    
-    for i, current in enumerate(currents):
-        if verbose:
-            print(f"  Measurement {i+1}/5 at {current*1000:.1f} mA...")
-        
-        # Simulate resistance with noise
-        base_resistance = thickness_cm / (base_sigma * area_cm2)
-        noise = np.random.normal(1, SIM_PARAMS['sigma_noise'])
-        resistance = base_resistance * noise
-        
-        # Calculate sigma for this measurement
-        sigma_value = thickness_cm / (resistance * area_cm2)
-        sigma_raw[i] = sigma_value
-        
-        # Simulate individual V1,V2,V3,V4 voltages from resistance
-        v1 = current * resistance * (1 + np.random.normal(0, 0.01))
-        v2 = current * resistance * (1 + np.random.normal(0, 0.01))
-        v3 = current * resistance * (1 + np.random.normal(0, 0.01))
-        v4 = current * resistance * (1 + np.random.normal(0, 0.01))
-        
+
+    current = float(MEASUREMENT_CURRENT)
+    # Resistances that a uniform sample of ``nominal_sigma`` would show,
+    # with a little iteration-to-iteration scatter and a slight R1/R2 mismatch.
+    d_cm = sample_t / 10.0
+    readings = [round(simulate_temperature_reading(temperature, seed=None if seed is None else seed + 1), 2)]
+
+    sigma_raw = np.zeros(5)
+    iteration_results = []
+
+    for j in range(5):
+        self_check = nominal_sigma(temperature)
+        noisy = self_check * float(rng.normal(1.0, SIM_PARAMS['sigma_noise']))
+        noisy = max(noisy, 1e-3)
+        rho = 1.0 / noisy
+        r_match = rho * np.log(2.0) / (np.pi * d_cm)
+        r1 = r_match * float(rng.normal(1.0, 0.005))
+        r2 = r_match * float(rng.normal(1.0, 0.005))
+        r1 = max(r1, 1e-9)
+        r2 = max(r2, 1e-9)
+
+        # abs(v1 - v2) / 2 = R * I, same definition as measure_sigma.
+        half_1 = r1 * current
+        half_2 = r2 * current
+        volt1, volt2 = half_1, -half_1
+        volt3, volt4 = half_2, -half_2
+        delta_v1 = abs(volt1 - volt2) / 2.0
+        delta_v2 = abs(volt3 - volt4) / 2.0
+
+        sigma_value = solve_vdp_sigma(r1, r2, sample_t)
+        sigma_raw[j] = sigma_value
+        sample_temp = round(
+            float(temperature + rng.normal(0, SIM_PARAMS['temp_noise'])), 1
+        )
+        readings.append(sample_temp)
+
+        iter_data = {
+            'iteration': j + 1,
+            'v1': float(volt1), 'v2': float(volt2),
+            'v3': float(volt3), 'v4': float(volt4),
+            'delta_v1': float(delta_v1), 'delta_v2': float(delta_v2),
+            'R1': float(r1), 'R2': float(r2),
+            'sigma': float(sigma_value),
+            'temperature': sample_temp,
+        }
+        iteration_results.append(iter_data)
         if logger:
-            logger.info(f"Iteration {i+1}/5: V1={v1:.6f} V, V2={v2:.6f} V, "
-                        f"V3={v3:.6f} V, V4={v4:.6f} V")
-            logger.info(f"  R={resistance:.6f} Ω → σ={sigma_value:.2f} S/cm")
-        
-        resistances.append(resistance)
-        measurements.append({
-            'current': current,
-            'voltage': current * resistance,
-            'resistance': resistance,
-            'sigma': sigma_value
-        })
-        
-        time.sleep(0.2)  # Small delay for realism
-    
-    # Calculate results
-    avg_resistance = np.mean(resistances)
-    std_resistance = np.std(resistances)
-    
-    # Uncorrected sigma (median of raw values)
-    uncorr_sigma = np.median(sigma_raw)
-    std_dev = np.std(sigma_raw)
-    
-    # Apply geometric correction (simulated)
-    D1 = sample_dia
-    d1 = (D1 - 9.0) / 2.0
-    error = 4 * ((d1**2) / (2 * D1**2 * np.log(2)))
-    corr_sigma = uncorr_sigma * (1 - error)
-    
-    # Use median current value
-    median_current = np.median(currents)
-    
+            logger.info(
+                f"Iteration {j + 1}/5: V1={volt1:.6f} V, V2={volt2:.6f} V, "
+                f"V3={volt3:.6f} V, V4={volt4:.6f} V"
+            )
+            logger.info(f"  R1={r1:.6f} Ω, R2={r2:.6f} Ω → σ={sigma_value:.2f} S/cm")
+        if progress_callback:
+            progress_callback(iter_data)
+        time.sleep(_SIGMA_PAUSE_S)
+
+    valid = sigma_raw[sigma_raw > 0]
+    if len(valid) == 0:
+        if logger:
+            logger.error("[SIMULATION] No valid sigma iterations")
+        return None
+
+    uncorr = float(np.median(valid))
+    error = _geometry_error(sample_dia)
+    corr = uncorr * (1.0 - error)
+    mean_temp = round(float(sum(readings) / len(readings)), 2)
+
     results = {
-        'corr_sigma': corr_sigma,
-        'uncorr_sigma': uncorr_sigma,
+        'corr_sigma': float(corr),
+        'uncorr_sigma': uncorr,
         'sigma_raw': sigma_raw,
-        'std_dev': std_dev,
-        'current': median_current,
-        'sample_thickness': sample_t,
-        'sample_diameter': sample_dia,
-        'valid_count': 5,
-        'total_count': 5,
-        'temperature': temperature,
-        'avg_resistance': avg_resistance,
-        'std_resistance': std_resistance,
-        'measurements': measurements,
-        'simulated': True
+        'std_dev': float(np.std(sigma_raw)),
+        'current': current,
+        'sample_thickness': float(sample_t),
+        'sample_diameter': float(sample_dia),
+        'valid_count': int(len(valid)),
+        'iterations': iteration_results,
+        'temperature': mean_temp,
+        'temperature_readings': readings,
+        'simulated': True,
     }
-    
+
     if verbose:
-        print(f"\n  [SIM] Electrical Conductivity: {corr_sigma:.2e} S/cm")
-        print(f"  [SIM] Average Resistance: {avg_resistance:.4f} Ω")
-    
+        print(f"  [SIM] Electrical Conductivity: {corr:.2e} S/cm")
+        print(f"  [SIM] Sample temperature: {mean_temp:.2f} °C")
     if logger:
-        logger.info(f"[SIMULATION] Sigma: {corr_sigma:.2e} S/cm")
-    
+        logger.info(f"[SIMULATION] Sigma: {corr:.2e} S/cm at {mean_temp:.2f} °C")
     return results
+
+
+def _heater_delta(t: float, measurement_time: float, amplitude: float = 4.5) -> float:
+    """T1 − T2 (°C) for one timestamp, following the real heater phases.
+
+    Side 1 is heated at the start, side 2 after the halfway point, each for
+    up to 60 s (shorter when the run itself is short).  The difference swings
+    positive, decays, then swings negative — the shape a real Seebeck trace has.
+    """
+    half = max(measurement_time / 2.0, 1.0)
+    on = min(60.0, half * 0.35)
+    tau_rise = max(on / 3.0, 1.0)
+    tau_decay = max(half / 4.0, 1.0)
+
+    def pulse(t0: float) -> float:
+        t1 = t0 + on
+        if t < t0:
+            return 0.0
+        if t < t1:
+            return amplitude * (1.0 - np.exp(-(t - t0) / tau_rise))
+        peak = amplitude * (1.0 - np.exp(-(t1 - t0) / tau_rise))
+        return peak * np.exp(-(t - t1) / tau_decay)
+
+    return pulse(0.0) - pulse(half)
 
 
 def simulate_seebeck_measurement(
@@ -164,293 +271,194 @@ def simulate_seebeck_measurement(
     measurement_time: float,
     output_folder: str,
     temperature: float = 25.0,
-    logger: Optional[logging.Logger] = None
+    logger: Optional[logging.Logger] = None,
+    plotter=None,
+    enable_plotting: bool = False,
+    seed: Optional[int] = None,
 ) -> Dict:
+    """Simulate a Seebeck run and return the real result schema.
+
+    ``data_avg`` columns are ``[t(s), T1(°C), T2(°C), V1(µV), V2(µV)]``,
+    matching ``SeebeckMeasurement.process_and_save_data``.  ``V1`` and ``V2``
+    passed to ``plotter.update`` are in volts, as the live GUI expects.
+    CSVs are written with ``save_to_csv`` into ``<output_folder>/data``.
     """
-    Simulate a Seebeck coefficient measurement with realistic data and plots.
-    
-    Args:
-        filename: Base filename for outputs
-        measurement_time: Measurement duration in seconds
-        output_folder: Folder to save outputs
-        temperature: Current temperature in °C
-        logger: Optional logger
-        
-    Returns:
-        Dictionary with simulated results
-    """
-    print("\n[SIMULATION MODE] Seebeck Measurement")
-    print(f"Measurement time: {measurement_time/60:.1f} minutes")
-    
+    rng = _rng(seed)
+    measurement_time = max(float(measurement_time), 2.0)
     if logger:
         logger.info("[SIMULATION] Starting simulated Seebeck measurement")
-    
-    output_path = Path(output_folder)
-    output_path.mkdir(parents=True, exist_ok=True)
-    
-    # Simulate temperature-dependent Seebeck
-    temp_factor = 1 + SIM_PARAMS['seebeck_temp_coeff'] * (temperature - 25)
-    true_seebeck = SIM_PARAMS['seebeck_base'] * temp_factor  # µV/K
-    
-    # Generate time series data
-    n_points = min(int(measurement_time / 2), 500)  # Sample every 2 seconds, max 500 points
-    time_data = np.linspace(0, measurement_time, n_points)
-    
-    # Simulate heater cycles (heating and cooling)
-    n_cycles = 4
-    cycle_period = measurement_time / n_cycles
-    
-    # Generate temperature difference data (oscillating)
-    delta_T_amplitude = 5.0  # ±5°C temperature difference
-    delta_T = delta_T_amplitude * np.sin(2 * np.pi * time_data / cycle_period)
-    delta_T += np.random.normal(0, 0.3, n_points)  # Add noise
-    
-    # Generate voltage response (Seebeck effect)
-    delta_V = true_seebeck * delta_T  # µV
-    delta_V += np.random.normal(0, abs(true_seebeck) * 0.05, n_points)  # Add noise
-    
-    # Hot and cold side temperatures
-    T_avg = temperature + np.random.normal(0, 1, n_points)
-    T_hot = T_avg + delta_T / 2
-    T_cold = T_avg - delta_T / 2
-    
-    # Simulate progress
-    print("  Collecting data", end="", flush=True)
-    for i in range(10):
-        time.sleep(0.1)
-        print(".", end="", flush=True)
-    print(" Done!")
-    
-    # Fit linear regression: ΔV = S * ΔT
-    # Use points where |ΔT| > 1 for better fit
-    mask = np.abs(delta_T) > 1.0
-    if np.sum(mask) > 10:
-        fit_dT = delta_T[mask]
-        fit_dV = delta_V[mask]
-    else:
-        fit_dT = delta_T
-        fit_dV = delta_V
-    
-    # Linear fit
-    coeffs = np.polyfit(fit_dT, fit_dV, 1)
-    seebeck_fit = coeffs[0]  # Slope is Seebeck coefficient
-    intercept = coeffs[1]
-    
-    # Calculate R²
-    y_pred = np.polyval(coeffs, fit_dT)
-    ss_res = np.sum((fit_dV - y_pred) ** 2)
-    ss_tot = np.sum((fit_dV - np.mean(fit_dV)) ** 2)
-    r_squared = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0
-    
-    # Adjusted R²
-    n = len(fit_dT)
-    p = 1  # Number of predictors
-    adj_r_squared = 1 - (1 - r_squared) * (n - 1) / (n - p - 1) if n > p + 1 else r_squared
-    
-    # Calculate RMSE
-    rmse = np.sqrt(ss_res / n) if n > 0 else 0
-    
-    # Create plots
-    _create_seebeck_plots(
-        time_data, delta_T, delta_V, T_hot, T_cold,
-        fit_dT, fit_dV, coeffs, seebeck_fit, adj_r_squared,
-        filename, output_path
-    )
-    
-    # Save data to CSV
-    _save_seebeck_data(
-        time_data, T_hot, T_cold, delta_T, delta_V,
-        filename, output_path
-    )
-    
-    # Prepare data_avg for compatibility (same format as real measurement)
+
+    n_points = int(np.clip(round(measurement_time / 2.0), 40, 200))
+    time_data = np.linspace(0.0, measurement_time, n_points)
+
+    target_s = nominal_seebeck(temperature)
+    slope_true = _vdp_slope(target_s, temperature)
+    offset_v = 2.0e-6  # volts
+
+    T1 = np.empty(n_points)
+    T2 = np.empty(n_points)
+    V1 = np.empty(n_points)
+    V2 = np.empty(n_points)
+    # Forward/backward pairs for *_all.csv, mirroring the 7-reading scan.
+    pairs = []
+
+    for i, t in enumerate(time_data):
+        delta = _heater_delta(float(t), measurement_time)
+        common = float(rng.normal(0, 0.03))
+        t1 = float(temperature + delta / 2.0 + common)
+        t2 = float(temperature - delta / 2.0 + common)
+        v1 = float(delta * 40e-6 + rng.normal(0, SIM_PARAMS['seebeck_noise_v']))
+        v2 = float(slope_true * v1 + offset_v
+                   + rng.normal(0, SIM_PARAMS['seebeck_noise_v']))
+        T1[i], T2[i], V1[i], V2[i] = t1, t2, v1, v2
+
+        # Tiny forward/backward differences, as the DAQ's two passes would show.
+        def _pair(value, scale):
+            a = value + float(rng.normal(0, scale))
+            b = value + float(rng.normal(0, scale))
+            return a, b
+
+        t1a, t1b = _pair(t1, 0.01)
+        t2a, t2b = _pair(t2, 0.01)
+        v1a, v1b = _pair(v1, 0.2e-6)
+        pairs.append((float(t), t1a, t1b, t2a, t2b, v1a, v1b, v2))
+
+        if plotter is not None:
+            plotter.update(float(t), t1, t2, v1, v2)
+        time.sleep(_SEEBECK_PAUSE_S)
+
+    T_avg = float(np.mean([np.mean(T1), np.mean(T2)]))
     data_avg = np.column_stack([
-        time_data,
-        T_hot,
-        T_cold,
-        delta_V,  # V1_avg (already in µV)
-        delta_V   # V2 (same for simulation)
+        time_data, T1, T2, V1 * 1e6, V2 * 1e6,
     ])
-    
+
+    _save_seebeck_csvs(filename, output_folder, pairs, data_avg)
+
+    slope, adj_r2, offset, rmse, seebeck = fit_v1_v2_and_calculate_seebeck(
+        V1, V2, T_avg,
+        plot=enable_plotting, save_plot=enable_plotting,
+        filename=filename, output_folder=output_folder,
+    )
+
     results = {
-        'Seebeck': seebeck_fit,
-        'S_slope': seebeck_fit,  # Alias for backward compatibility
-        'T_avg': np.mean(T_avg),
-        'T_hot_avg': np.mean(T_hot),
-        'T_cold_avg': np.mean(T_cold),
-        'slope': seebeck_fit,  # V1-V2 slope (same as Seebeck for simulation)
-        'adj_r_square': adj_r_squared,
-        'offset': intercept,
-        'rmse': rmse,
+        'T_avg': T_avg,
+        'Seebeck': float(seebeck),
+        'S_slope': float(seebeck),
+        'slope': float(slope),
+        'adj_r_square': float(adj_r2),
+        'offset': float(offset),
+        'rmse': float(rmse),
+        'data_avg': data_avg,
         'n_points': n_points,
         'measurement_time': measurement_time,
-        'data_avg': data_avg,
-        'simulated': True
+        'simulated': True,
     }
-    
-    print(f"\n  [SIM] Seebeck Coefficient: {seebeck_fit:.2f} µV/K")
-    print(f"  [SIM] Average Temperature: {np.mean(T_avg):.2f} °C")
-    print(f"  [SIM] Fit Quality (R²): {adj_r_squared:.6f}")
-    
     if logger:
-        logger.info(f"[SIMULATION] Seebeck: {seebeck_fit:.2f} µV/K")
-        logger.info(f"[SIMULATION] R²: {adj_r_squared:.6f}")
-    
+        logger.info(f"[SIMULATION] Seebeck: {seebeck:.2f} µV/K")
+        logger.info(f"[SIMULATION] R²: {adj_r2:.6f}  T_avg: {T_avg:.2f} °C")
+    if enable_plotting:
+        print(f"  [SIM] Seebeck Coefficient: {seebeck:.2f} µV/K")
+        print(f"  [SIM] Average Temperature: {T_avg:.2f} °C")
+        print(f"  [SIM] Fit Quality (R²): {adj_r2:.6f}")
     return results
 
 
-def _create_seebeck_plots(
-    time_data, delta_T, delta_V, T_hot, T_cold,
-    fit_dT, fit_dV, coeffs, seebeck_fit, r_squared,
-    filename, output_path
-):
-    """Create and save Seebeck measurement plots."""
-    
-    # Plot 1: Time series
-    fig1, axes = plt.subplots(3, 1, figsize=(12, 10), sharex=True)
-    
-    # Temperature vs time
-    axes[0].plot(time_data/60, T_hot, 'r-', label='T_hot', alpha=0.7)
-    axes[0].plot(time_data/60, T_cold, 'b-', label='T_cold', alpha=0.7)
-    axes[0].set_ylabel('Temperature (°C)', fontweight='bold')
-    axes[0].legend()
-    axes[0].grid(True, alpha=0.3)
-    axes[0].set_title(f'{filename} - Temperature Profile [SIMULATED]', fontweight='bold')
-    
-    # ΔT vs time
-    axes[1].plot(time_data/60, delta_T, 'g-', alpha=0.7)
-    axes[1].set_ylabel('ΔT (°C)', fontweight='bold')
-    axes[1].grid(True, alpha=0.3)
-    axes[1].axhline(y=0, color='k', linestyle='--', alpha=0.3)
-    
-    # ΔV vs time
-    axes[2].plot(time_data/60, delta_V, 'm-', alpha=0.7)
-    axes[2].set_ylabel('ΔV (µV)', fontweight='bold')
-    axes[2].set_xlabel('Time (minutes)', fontweight='bold')
-    axes[2].grid(True, alpha=0.3)
-    axes[2].axhline(y=0, color='k', linestyle='--', alpha=0.3)
-    
-    plt.tight_layout()
-    fig1.savefig(output_path / f"{filename}_timeseries.png", dpi=300, bbox_inches='tight')
-    plt.close(fig1)
-    
-    # Plot 2: ΔV vs ΔT with linear fit
-    fig2, ax = plt.subplots(figsize=(10, 8))
-    
-    ax.scatter(fit_dT, fit_dV, alpha=0.5, s=20, label='Data points')
-    
-    # Fit line
-    fit_x = np.linspace(min(fit_dT), max(fit_dT), 100)
-    fit_y = np.polyval(coeffs, fit_x)
-    ax.plot(fit_x, fit_y, 'r-', linewidth=2, 
-            label=f'Linear fit: S = {seebeck_fit:.2f} µV/K')
-    
-    ax.set_xlabel('ΔT (°C)', fontsize=12, fontweight='bold')
-    ax.set_ylabel('ΔV (µV)', fontsize=12, fontweight='bold')
-    ax.set_title(f'{filename} - Seebeck Coefficient Determination [SIMULATED]', 
-                 fontsize=14, fontweight='bold')
-    ax.legend(fontsize=10)
-    ax.grid(True, alpha=0.3)
-    
-    # Add R² annotation
-    textstr = f'R² = {r_squared:.6f}\nS = {seebeck_fit:.2f} µV/K'
-    props = dict(boxstyle='round', facecolor='wheat', alpha=0.5)
-    ax.text(0.05, 0.95, textstr, transform=ax.transAxes, fontsize=12,
-            verticalalignment='top', bbox=props)
-    
-    plt.tight_layout()
-    fig2.savefig(output_path / f"{filename}_seebeck_fit.png", dpi=300, bbox_inches='tight')
-    plt.close(fig2)
-    
-    print(f"  Saved plots to {output_path}")
-
-
-def _save_seebeck_data(time_data, T_hot, T_cold, delta_T, delta_V, filename, output_path):
-    """Save Seebeck measurement data to CSV."""
-    df = pd.DataFrame({
-        'Time_s': time_data,
-        'T_hot_C': T_hot,
-        'T_cold_C': T_cold,
-        'Delta_T_C': delta_T,
-        'Delta_V_uV': delta_V
-    })
-    
-    csv_path = output_path / f"{filename}_data.csv"
-    df.to_csv(csv_path, index=False)
-    print(f"  Saved data to {csv_path}")
+def _save_seebeck_csvs(filename, output_folder, pairs, data_avg) -> None:
+    """Write the same two CSVs a real Seebeck run writes."""
+    all_rows = []
+    for t, t1a, t1b, t2a, t2b, v1a, v1b, v2 in pairs:
+        all_rows.append([
+            t - 0.06, t1a, np.nan,
+            t - 0.04, v1a * 1e6, np.nan,
+            t - 0.02, t2a, np.nan,
+            t, v2 * 1e6, np.nan,
+            t + 0.02, t2b, np.nan,
+            t + 0.04, v1b * 1e6, np.nan,
+            t + 0.06, t1b,
+        ])
+    headers_all = [
+        't_T1_1(s)', 'T1_1(°C)', '',
+        't_V1_1(s)', 'V1_1(µV)', '',
+        't_T2_1(s)', 'T2_1(°C)', '',
+        't_V2(s)', 'V2(µV)', '',
+        't_T2_2(s)', 'T2_2(°C)', '',
+        't_V1_2(s)', 'V1_2(µV)', '',
+        't_T1_2(s)', 'T1_2(°C)',
+    ]
+    save_to_csv(f'{filename}_all.csv', np.array(all_rows), headers_all, output_folder)
+    headers_avg = ['t(s)', 'T1_avg(°C)', 'T2_avg(°C)', 'V1_avg(µV)', 'V2(µV)']
+    save_to_csv(f'{filename}_averaged.csv', data_avg, headers_avg, output_folder)
 
 
 def simulate_eurotherm_ramp(
     start_temp: float,
     target_temp: float,
     ramp_rate: float,
-    stability_time: float = 30.0
+    stability_time: float = 30.0,
 ) -> Tuple[float, bool]:
+    """Simulate a furnace ramp. Returns ``(actual_temperature_C, is_stable)``.
+
+    Wall-clock time is a fraction of a second. The reading sits within a few
+    tenths of a degree of the target, as a stabilised furnace would.
     """
-    Simulate Eurotherm temperature ramp and stabilization.
-    
-    Args:
-        start_temp: Starting temperature in °C
-        target_temp: Target temperature in °C
-        ramp_rate: Ramp rate in °C/min
-        stability_time: Time to wait after reaching target
-        
-    Returns:
-        Tuple of (actual_temperature, is_stable)
-    """
-    print(f"\n[SIMULATION] Ramping from {start_temp:.1f}°C to {target_temp:.1f}°C at {ramp_rate}°C/min")
-    
-    # Calculate ramp time
     temp_diff = abs(target_temp - start_temp)
-    ramp_time = temp_diff / ramp_rate * 60  # seconds
-    
-    # Simulate with accelerated time (max 5 seconds real time)
-    sim_time = min(ramp_time / 60, 5.0)
-    
-    print(f"  [SIM] Ramp time would be {ramp_time/60:.1f} min (simulating in {sim_time:.1f}s)")
-    
-    # Animate progress
-    steps = 10
+    ramp_minutes = temp_diff / max(ramp_rate, 0.1)
+    print(
+        f"\n[SIMULATION] Ramping {start_temp:.1f}°C → {target_temp:.1f}°C "
+        f"at {ramp_rate}°C/min ({ramp_minutes:.1f} min on real hardware)"
+    )
+    steps = 4
+    sim_time = 0.0 if temp_diff < 0.05 else _RAMP_PAUSE_S
     for i in range(steps):
         current = start_temp + (target_temp - start_temp) * (i + 1) / steps
         print(f"\r  [SIM] Temperature: {current:.1f}°C", end="", flush=True)
-        time.sleep(sim_time / steps)
-    
-    print(f"\r  [SIM] Temperature: {target_temp:.1f}°C - STABLE")
-    
-    # Add small random deviation
-    actual_temp = target_temp + np.random.normal(0, 0.5)
-    
-    return actual_temp, True
+        if sim_time:
+            time.sleep(sim_time / steps)
+    actual = float(target_temp + np.random.normal(0, 0.2))
+    print(f"\r  [SIM] Temperature: {actual:.1f}°C - STABLE")
+    return actual, True
 
 
 class SimulatedSeebeckMeasurement:
+    """Drop-in stand-in for ``SeebeckMeasurement`` that never opens instruments.
+
+    Assign ``plotter`` (anything with ``update(t, t1, t2, v1, v2)``) before
+    ``run_measurement`` to stream live points. Voltages on that callback are
+    in volts.
     """
-    Simulated version of SeebeckMeasurement class for testing.
-    """
-    
+
     def __init__(self, enable_plotting: bool = True):
         self.enable_plotting = enable_plotting
-        print("[SIMULATION] Initialized simulated Seebeck measurement system")
-    
+        self.plotter = None
+
     def run_measurement(
         self,
         filename: str,
         measurement_time: float,
         output_folder: str,
-        logger: Optional[logging.Logger] = None
+        logger: Optional[logging.Logger] = None,
+        temperature: Optional[float] = None,
     ) -> Dict:
-        """Run simulated measurement."""
+        """Run a simulated measurement at ``temperature`` (°C).
+
+        When ``temperature`` is omitted a room-temperature reading is used.
+        Pass the furnace temperature for a sweep so the saved trace matches
+        the folder it is written into.
+        """
+        if temperature is None:
+            temperature = simulate_temperature_reading()
         return simulate_seebeck_measurement(
             filename=filename,
             measurement_time=measurement_time,
             output_folder=output_folder,
-            temperature=simulate_temperature_reading(),
-            logger=logger
+            temperature=temperature,
+            logger=logger,
+            plotter=self.plotter,
+            enable_plotting=self.enable_plotting,
         )
 
 
-# Global simulation mode flag
+# Global simulation mode flag (command-line scripts)
 SIMULATION_MODE = False
 
 
@@ -459,10 +467,10 @@ def set_simulation_mode(enabled: bool):
     global SIMULATION_MODE
     SIMULATION_MODE = enabled
     if enabled:
-        print("\n" + "="*60)
-        print("⚠️  SIMULATION MODE ENABLED")
+        print("\n" + "=" * 60)
+        print("SIMULATION MODE ENABLED")
         print("All measurements will use simulated data.")
-        print("="*60 + "\n")
+        print("=" * 60 + "\n")
 
 
 def is_simulation_mode() -> bool:
