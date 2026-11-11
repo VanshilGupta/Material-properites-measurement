@@ -54,6 +54,7 @@ from constants import (
     EUROTHERM_COM_PORT, EUROTHERM_DEVICE_ADDRESS,
     EUROTHERM_BAUD_RATE, EUROTHERM_TIMEOUT,
     INSTRUMENT_SERVER_PORT, INSTRUMENT_SERVER_TOKEN,
+    read_thermocouple_temperature,
 )
 from seebeck_measurement.instruments import DAQController, PowerSupplyController
 from eurotherm_control import EurothermController
@@ -178,24 +179,21 @@ def get_temperature():
     # Use persistent DAQ if connected, else open fresh connection
     try:
         if state.daq and state.daq._is_connected:
-            daq = state.daq
-            daq.write('ROUT:SCAN (@111)')
-            daq.write('SENS:FUNC "TEMP", (@111)')
-            daq.write('SENS:TEMP:TRAN TC')
-            daq.write('SENS:TEMP:TYPE K')
-            temp = float(daq.query('READ?').strip())
+            temp = read_thermocouple_temperature(state.daq)
         else:
             import pyvisa
             rm = pyvisa.ResourceManager()
             inst = rm.open_resource(DAQ_RESOURCE)
             inst.timeout = DAQ_TIMEOUT
-            inst.write('ROUT:SCAN (@111)')
-            inst.write('SENS:FUNC "TEMP", (@111)')
-            inst.write('SENS:TEMP:TRAN TC')
-            inst.write('SENS:TEMP:TYPE K')
-            temp = float(inst.query('READ?').strip())
-            inst.close()
+            try:
+                temp = read_thermocouple_temperature(inst)
+            finally:
+                inst.close()
+        if temp is None:
+            raise HTTPException(500, "Temperature read failed: no usable channel-111 reading")
         return {"temperature": temp}
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(500, f"Temperature read failed: {exc}")
 

@@ -578,8 +578,59 @@ def measure_sigma(sample_t=None, sample_dia=None, verbose=True, logger=None,
 TEMPERATURE_FAILED_TEXT = "Failed to record"
 
 
+def _positive_celsius(value):
+    """A temperature worth writing to a sigma file, or None.
+
+    A type-K reading of 0 °C is 0 mV. Printed with two decimal places that
+    is ``0.00``, which is what a room-temperature sample looks like when the
+    cold junction was not applied. Anything that would be saved as 0.00 °C
+    (or below) is rejected.
+    """
+    try:
+        t = float(value)
+    except (TypeError, ValueError):
+        return None
+    if np.isfinite(t) and round(t, 2) > 0:
+        return t
+    return None
+
+
+def record_sample_temperature(results, readings, fallback=None):
+    """Store the σ sample temperature on ``results``.
+
+    Readings that are missing or that would be written as 0.00 °C are left
+    out of the mean. When none remain, ``fallback`` — the temperature this
+    point was measured at — is stored instead, and each iteration row the
+    sigma CSV writes gets that same temperature.
+    """
+    if not results:
+        return results
+    kept = [t for t in (_positive_celsius(v) for v in (readings or [])) if t is not None]
+    fallback_c = _positive_celsius(fallback)
+    if fallback_c is None:
+        fallback_c = _positive_celsius(results.get("actual_temp"))
+    if kept:
+        temperature = round(sum(kept) / len(kept), 2)
+    elif fallback_c is not None:
+        temperature = round(fallback_c, 2)
+    else:
+        temperature = None
+    results["temperature_readings"] = kept
+    if temperature is None:
+        results["temperature"] = None
+        results["temperature_note"] = TEMPERATURE_FAILED_TEXT
+        return results
+    results["temperature"] = temperature
+    results.pop("temperature_note", None)
+    for it in results.get("iterations") or []:
+        if _positive_celsius(it.get("temperature")) is None:
+            it["temperature"] = round(temperature, 1)
+    return results
+
+
 def measure_sigma_with_sample_temperature(read_temperature, readings=None,
-                                          progress_callback=None, **kwargs):
+                                          progress_callback=None,
+                                          fallback_temperature=None, **kwargs):
     """Run ``measure_sigma`` and record the SAMPLE's mean temperature.
 
     The sample thermocouple is read before σ starts and again after every
@@ -606,7 +657,9 @@ def measure_sigma_with_sample_temperature(read_temperature, readings=None,
         ``measure_sigma``'s results plus ``'temperature'`` (mean of all
         readings, or ``None`` with a ``'temperature_note'`` if none could be
         read) and ``'temperature_readings'``.  Every iteration dict also gets
-        its own ``'temperature'``.
+        its own ``'temperature'``.  A 0 °C reading is not stored: the sigma
+        file uses ``fallback_temperature`` (the temperature this point was
+        measured at) instead.
     """
     def _read():
         try:
@@ -618,12 +671,12 @@ def measure_sigma_with_sample_temperature(read_temperature, readings=None,
 
     if readings is None:
         t = _read()
-        readings = [t] if t is not None else []
+        readings = [t] if _positive_celsius(t) is not None else []
     else:
-        readings = list(readings)
+        readings = [t for t in readings if _positive_celsius(t) is not None]
 
     def _callback(iter_data):
-        t = _read()
+        t = _positive_celsius(_read())
         iter_data['temperature'] = round(t, 1) if t is not None else None
         if t is not None:
             readings.append(t)
@@ -632,12 +685,7 @@ def measure_sigma_with_sample_temperature(read_temperature, readings=None,
 
     results = measure_sigma(progress_callback=_callback, **kwargs)
     if results:
-        results['temperature_readings'] = readings
-        if readings:
-            results['temperature'] = round(sum(readings) / len(readings), 2)
-        else:
-            results['temperature'] = None
-            results['temperature_note'] = TEMPERATURE_FAILED_TEXT
+        record_sample_temperature(results, readings, fallback_temperature)
     return results
 
 
@@ -646,12 +694,16 @@ def _result_temperature(results):
 
     The GUI stores the sample temperature as ``'temperature'`` (``None`` plus
     a ``'temperature_note'`` if it couldn't be read); run_sigma.py /
-    run_combined.py store ``'actual_temp'``.  Empty if nothing is present.
+    run_combined.py store ``'actual_temp'``.  A value that would be written
+    as 0.00 °C is skipped.  Empty if nothing usable is present.
     """
-    temp = results.get('temperature', results.get('actual_temp'))
-    if temp is None:
-        return results.get('temperature_note', "")
-    return f"{temp:.2f}"
+    if not results:
+        return ""
+    for key in ("temperature", "actual_temp"):
+        temp = _positive_celsius(results.get(key))
+        if temp is not None:
+            return f"{temp:.2f}"
+    return results.get("temperature_note", "") or ""
 
 
 def save_results_to_csv(results, sample_name, output_folder=None):
@@ -755,12 +807,15 @@ def save_iteration_data_to_csv(results, sample_name, output_folder=None):
         temp_str = _result_temperature(results)
 
         def _iter_temp(it):
-            # The GUI reads the sample temperature after every iteration;
-            # otherwise every row gets the measurement's temperature.
-            if "temperature" not in it:
+            # A 0 °C iteration reading is 0 mV at room temperature, not the
+            # sample temperature. Use the measurement temperature (already
+            # corrected) so the sigma file does not say 0.00.
+            t = _positive_celsius(it.get("temperature"))
+            if t is not None:
+                return f"{t:.2f}"
+            if temp_str:
                 return temp_str
-            t = it["temperature"]
-            return f"{t:.2f}" if t is not None else TEMPERATURE_FAILED_TEXT
+            return TEMPERATURE_FAILED_TEXT
 
         with open(filepath, "w", encoding="utf-8-sig") as f:
             f.write(",".join(headers) + "\n")

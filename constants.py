@@ -140,8 +140,85 @@ def is_valid_temperature(value) -> bool:
     return math.isfinite(t) and TEMP_VALID_MIN_C <= t <= TEMP_VALID_MAX_C
 
 
+def reference_temperature_c(response: str) -> Optional[float]:
+    """Cold-junction temperature (°C) for channel 111 from a REFTEMP? reply.
+
+    ``:CAL:PROT:CARD1:REFTEMP?`` returns the card's junction sensors.
+    Seebeck uses the same reply: index 4 is the junction for channel 111
+    (thermocouple 2), index 1 is the other junction.
+    """
+    try:
+        values = [float(x) for x in str(response).strip().split(",") if x.strip()]
+    except (TypeError, ValueError):
+        return None
+    for idx in (4, 1):
+        if idx < len(values) and is_valid_temperature(values[idx]) and values[idx] > 0:
+            return float(values[idx])
+    return None
+
+
+def sample_temperature_to_record(reading, reference) -> Optional[float]:
+    """Temperature (°C) to store for a channel-111 reading, or None.
+
+    A type-K result of 0 °C is 0 mV. With the cold junction left at a
+    simulated 0 °C, that is what the DAQ reports when the sample is at room
+    temperature — the same temperature as the terminals. The card's
+    reference-junction sensor is that temperature, so it replaces a
+    non-positive reading. A failed read (no number, or an overflow) is not
+    replaced: the sample is not known to be at the terminal temperature.
+    """
+    if not is_valid_temperature(reading):
+        return None
+    reading = round(float(reading), 1)
+    if reading > 0:
+        return reading
+    if is_valid_temperature(reference):
+        reference = round(float(reference), 1)
+        if reference > 0:
+            return reference
+    return None
+
+
+def _configure_sample_thermocouple(daq) -> None:
+    """Channel 111 as a type-K thermocouple with the internal cold junction.
+
+    The unqualified transducer commands are the ones this instrument already
+    measures with. The channel-qualified commands, including the internal
+    reference junction, are sent as well: a simulated 0 °C junction makes a
+    room-temperature sample read 0 °C.
+    """
+    daq.write("ROUT:SCAN (@111)")
+    daq.write('SENS:FUNC "TEMP", (@111)')
+    daq.write("SENS:TEMP:TRAN TC")
+    daq.write("SENS:TEMP:TYPE K")
+    for command in (
+        "SENS:TEMP:TRAN TC, (@111)",
+        "SENS:TEMP:TC:TYPE K, (@111)",
+        "SENS:TEMP:TC:RJUN:RSEL INT, (@111)",
+    ):
+        try:
+            daq.write(command)
+        except Exception:
+            pass
+
+
+def read_thermocouple_temperature(daq) -> Optional[float]:
+    """One channel-111 sample temperature (°C) from an open DAQ session."""
+    _configure_sample_thermocouple(daq)
+    reading = float(daq.query("READ?").strip())
+    reference = None
+    if sample_temperature_to_record(reading, None) is None:
+        try:
+            reference = reference_temperature_c(
+                daq.query(":CAL:PROT:CARD1:REFTEMP?")
+            )
+        except Exception:
+            reference = None
+    return sample_temperature_to_record(reading, reference)
+
+
 def read_current_temperature() -> Optional[float]:
-    """Read the current furnace temperature from the DAQ's type-K thermocouple.
+    """Read the current sample temperature from the DAQ's type-K thermocouple.
 
     Local mode: opens the DAQ via pyvisa, configures channel 111 as a
     type-K thermocouple, and queries one reading.
@@ -151,16 +228,18 @@ def read_current_temperature() -> Optional[float]:
 
     Returns:
         Temperature in °C, or ``None`` if the read failed or the value is
-        not a plausible temperature.  Callers must handle ``None``: a
-        substitute value would end up in folder names and data files as if
-        it had been measured.
+        not a plausible temperature. A 0 °C reading is not returned: it is
+        replaced with the card's reference-junction temperature when that
+        sensor has a real value, and dropped otherwise. Callers must handle
+        ``None``: a made-up value would end up in folder names and data
+        files as if it had been measured.
     """
     t = _read_daq_temperature()
-    return float(t) if is_valid_temperature(t) else None
+    return float(t) if is_valid_temperature(t) and float(t) > 0 else None
 
 
 def _read_daq_temperature():
-    """Raw DAQ thermocouple reading, or ``None`` if the read failed."""
+    """Sample temperature from channel 111, or ``None`` if the read failed."""
     if REMOTE_MODE:
         try:
             import requests
@@ -180,11 +259,7 @@ def _read_daq_temperature():
         rm = pyvisa.ResourceManager()
         daq = rm.open_resource(DAQ_RESOURCE)
         try:
-            daq.write('ROUT:SCAN (@111)')
-            daq.write('SENS:FUNC "TEMP", (@111)')
-            daq.write('SENS:TEMP:TRAN TC')
-            daq.write('SENS:TEMP:TYPE K')
-            return float(daq.query('READ?').strip())
+            return read_thermocouple_temperature(daq)
         finally:
             daq.close()
     except Exception:

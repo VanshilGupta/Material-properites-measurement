@@ -47,7 +47,8 @@ from output_manager import (                                # noqa: E402
 )
 from measure_sigma import (                                 # noqa: E402
     TEMPERATURE_FAILED_TEXT, MeasurementAborted,
-    measure_sigma_with_sample_temperature, save_iteration_data_to_csv,
+    measure_sigma_with_sample_temperature, record_sample_temperature,
+    save_iteration_data_to_csv,
 )
 from master_file import append_master_row, master_file_path  # noqa: E402
 from seebeck_measurement import SeebeckMeasurement           # noqa: E402
@@ -224,6 +225,33 @@ class _MeasurementWorker(QObject):
 
     # ── sigma sub-routine ────────────────────────────────────────────────
 
+    def _repair_sigma_sample_temperature(self, results: dict,
+                                         point_temp: float) -> bool:
+        """Replace a missing or 0 °C σ sample temperature with the point temperature.
+
+        A type-K read of 0 °C is 0 mV, which is what channel 111 reports at
+        room temperature when the cold junction is not applied. The point was
+        already measured at ``point_temp`` — that is the value the master
+        file and the iteration CSV keep.
+        """
+        if not results or not (point_temp and point_temp > 0):
+            return False
+        raw = results.get("temperature")
+        record_sample_temperature(
+            results, results.get("temperature_readings"), fallback=point_temp)
+        saved = results.get("temperature")
+        if isinstance(raw, (int, float)) and round(float(raw), 2) > 0:
+            return False
+        if not isinstance(saved, (int, float)) or saved <= 0:
+            return False
+        self._log(
+            "⚠ σ sample temperature was "
+            + ("not recorded" if raw is None else f"{raw:.1f} °C")
+            + f" — saved as {results['temperature']:.1f} °C "
+            "(the temperature this point was measured at)"
+        )
+        return True
+
     def _run_sigma(self, config: dict, current_temp: float,
                    sigma_folder: Path, temp_logger, global_logger) -> Optional[dict]:
         """Execute σ measurement.  Returns results dict or None."""
@@ -266,19 +294,22 @@ class _MeasurementWorker(QObject):
                     read_current_temperature,
                     readings=[start_temp] if start_temp is not None else [],
                     progress_callback=_sigma_progress,
+                    fallback_temperature=current_temp,
                     sample_t=thickness, sample_dia=diameter,
                     verbose=True, logger=temp_logger,
                 )
 
             if results:
-                sample_temps = results["temperature_readings"]
-                if sample_temps:
+                repaired = self._repair_sigma_sample_temperature(
+                    results, current_temp)
+                sample_temps = results.get("temperature_readings") or []
+                if not repaired and sample_temps:
                     self._log(
                         f"σ sample temperature: {results['temperature']:.2f} °C  "
                         f"(mean of {len(sample_temps)} readings, "
                         f"{min(sample_temps):.1f}–{max(sample_temps):.1f} °C)"
                     )
-                else:
+                elif not repaired:
                     self._log("⚠ No sample temperature (ch 111) could be read "
                               f"during σ — the data will say "
                               f"'{TEMPERATURE_FAILED_TEXT}'")

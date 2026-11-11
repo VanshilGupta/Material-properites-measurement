@@ -99,6 +99,7 @@ def run_single_sigma(sample_name: str, thickness: float, diameter: float):
             results = measure_sigma_with_sample_temperature(
                 read_current_temperature,
                 readings=[current_temp],
+                fallback_temperature=current_temp,
                 sample_t=thickness,
                 sample_dia=diameter,
                 verbose=True,
@@ -254,6 +255,7 @@ def run_sigma_temperature_sweep(
                     # Sample temperature averaged over σ (ch 111)
                     results = measure_sigma_with_sample_temperature(
                         read_current_temperature,
+                        fallback_temperature=actual_temp,
                         sample_t=thickness,
                         sample_dia=diameter,
                         verbose=True,
