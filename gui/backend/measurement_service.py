@@ -52,7 +52,10 @@ from measure_sigma import (                                 # noqa: E402
 )
 from master_file import append_master_row, master_file_path  # noqa: E402
 from seebeck_measurement import SeebeckMeasurement           # noqa: E402
-from constants import is_valid_temperature, read_current_temperature  # noqa: E402
+from constants import (                                     # noqa: E402
+    is_valid_temperature, read_current_temperature,
+    read_sigma_sample_temperature,
+)
 from simulation import (                                     # noqa: E402
     SimulatedSeebeckMeasurement,
     simulate_eurotherm_ramp,
@@ -72,8 +75,8 @@ _COOL_DOWN_TEMP_C = 25.0
 _TEMP_READ_ATTEMPTS = 3
 _TEMP_RETRY_DELAY_S = 10.0
 
-# Pause between tries when reading the sample temperature (DAQ ch 111) for
-# the σ data (s); it is tried _TEMP_READ_ATTEMPTS times.
+# Pause between tries when reading the sample temperature (mean of DAQ
+# channels 101 and 111) for the σ data (s); it is tried _TEMP_READ_ATTEMPTS times.
 _SAMPLE_TEMP_RETRY_S = 2.0
 
 # Cycle start point: hold after the expected ramp time (s), used instead of
@@ -286,12 +289,12 @@ class _MeasurementWorker(QObject):
                     progress_callback=_sigma_progress,
                 )
             else:
-                # The σ data records the SAMPLE's temperature (DAQ ch 111) — never
-                # the furnace's — averaged over the measurement: this reading
-                # (with retries) plus one after every VDP iteration.
+                # The σ data records the SAMPLE temperature: the mean of
+                # thermocouple channels 101 and 111, never the furnace.
+                # Averaged over this reading plus one after every VDP iteration.
                 start_temp = self._read_sample_temperature()
                 results = measure_sigma_with_sample_temperature(
-                    read_current_temperature,
+                    read_sigma_sample_temperature,
                     readings=[start_temp] if start_temp is not None else [],
                     progress_callback=_sigma_progress,
                     fallback_temperature=current_temp,
@@ -310,7 +313,7 @@ class _MeasurementWorker(QObject):
                         f"{min(sample_temps):.1f}–{max(sample_temps):.1f} °C)"
                     )
                 elif not repaired:
-                    self._log("⚠ No sample temperature (ch 111) could be read "
+                    self._log("⚠ No sample temperature (ch 101 and 111) could be read "
                               f"during σ — the data will say "
                               f"'{TEMPERATURE_FAILED_TEXT}'")
                 # The σ summary goes into the master file (see
@@ -1235,22 +1238,22 @@ class _MeasurementWorker(QObject):
         return None, None
 
     def _read_sample_temperature(self) -> Optional[float]:
-        """Sample temperature from the DAQ thermocouple (channel 111), or None.
+        """Sample temperature: mean of DAQ channels 101 and 111, or None.
 
         Tried ``_TEMP_READ_ATTEMPTS`` times.  There is deliberately no
         fallback to the furnace: the σ data holds the sample's own
         temperature or states that it failed to record.
         """
         for attempt in range(1, _TEMP_READ_ATTEMPTS + 1):
-            t = read_current_temperature()
+            t = read_sigma_sample_temperature()
             if t is not None:
                 t = round(t, 1)
-                self._log(f"Sample temperature (ch 111): {t:.1f} °C")
+                self._log(f"Sample temperature (mean of ch 101 and 111): {t:.1f} °C")
                 return t
             if attempt < _TEMP_READ_ATTEMPTS:
                 self._interruptible_sleep(_SAMPLE_TEMP_RETRY_S,
                                           "sample temperature retry")
-        self._log("⚠ Sample temperature (ch 111) could not be read before σ "
+        self._log("⚠ Sample temperature (ch 101 and 111) could not be read before σ "
                   "— it is read again after every σ iteration")
         return None
 

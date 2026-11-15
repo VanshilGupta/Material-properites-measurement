@@ -12,7 +12,7 @@ stays in the per-temperature Sigma/ and Seebeck/ subfolders.
 
 Temperatures are the SAMPLE's, and σ and Seebeck each have their own since
 they are measured at different times:
-  - σ:       mean of the DAQ ch 111 readings taken during the σ measurement
+  - σ:       mean of DAQ channels 101 and 111 during the σ measurement
   - Seebeck: mean of every T₁ and T₂ reading of the Seebeck run
 The furnace set-point is kept only to tell the cycle's points apart.
 

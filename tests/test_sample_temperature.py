@@ -30,6 +30,18 @@ def test_zero_without_a_reference_is_not_recorded():
     assert reference_temperature_c("not a reading") is None
 
 
+def test_sigma_temperature_is_the_mean_of_both_thermocouples():
+    from constants import mean_sigma_temperature
+
+    assert mean_sigma_temperature(100.0, 110.0) == 105.0
+    # One channel dead at 0 °C while the other is hot: keep the hot one.
+    assert mean_sigma_temperature(0.0, 200.0, ref101=25.0, ref111=25.0) == 200.0
+    # Both at 0 mV: the sample is at the cold junctions, so average those.
+    assert mean_sigma_temperature(0.0, 0.0, ref101=23.0, ref111=25.0) == 24.0
+    # Neither channel read: no temperature.
+    assert mean_sigma_temperature(None, None, ref101=25.0, ref111=25.0) is None
+
+
 def test_sigma_iterations_csv_writes_the_measured_temperature(tmp_path):
     from measure_sigma import record_sample_temperature, save_iteration_data_to_csv
 

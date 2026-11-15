@@ -23,7 +23,8 @@ from constants import (
     EUROTHERM_STABILITY_TOLERANCE,
     EUROTHERM_STABILITY_TIME,
     EUROTHERM_STABILITY_TIMEOUT,
-    read_current_temperature
+    read_current_temperature,
+    read_sigma_sample_temperature,
 )
 from output_manager import (
     create_single_measurement_structure,
@@ -95,10 +96,9 @@ def run_single_sigma(sample_name: str, thickness: float, diameter: float):
             if results:
                 results['temperature'] = current_temp  # simulated sample reading
         else:
-            # Sample temperature averaged over σ (ch 111, read between iterations)
+            # Sample temperature: mean of ch 101 and 111, read between iterations
             results = measure_sigma_with_sample_temperature(
-                read_current_temperature,
-                readings=[current_temp],
+                read_sigma_sample_temperature,
                 fallback_temperature=current_temp,
                 sample_t=thickness,
                 sample_dia=diameter,
@@ -252,9 +252,9 @@ def run_sigma_temperature_sweep(
                     if results:
                         results['temperature'] = actual_temp  # simulated sample reading
                 else:
-                    # Sample temperature averaged over σ (ch 111)
+                    # Sample temperature: mean of ch 101 and 111
                     results = measure_sigma_with_sample_temperature(
-                        read_current_temperature,
+                        read_sigma_sample_temperature,
                         fallback_temperature=actual_temp,
                         sample_t=thickness,
                         sample_dia=diameter,

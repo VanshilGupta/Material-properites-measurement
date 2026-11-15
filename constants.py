@@ -179,22 +179,83 @@ def sample_temperature_to_record(reading, reference) -> Optional[float]:
     return None
 
 
-def _configure_sample_thermocouple(daq) -> None:
-    """Channel 111 as a type-K thermocouple with the internal cold junction.
+# Sigma sample temperature is the mean of these two type-K thermocouples.
+# 101 is side A (Seebeck T₁), 111 is side B (Seebeck T₂).
+SIGMA_SAMPLE_CHANNELS = (101, 111)
+
+# Index into a ``:CAL:PROT:CARD1:REFTEMP?`` reply. Seebeck uses the same
+# layout: index 1 is thermocouple 1 (channel 101), index 4 is thermocouple 2
+# (channel 111).
+_CHANNEL_REF_INDEX = {101: 1, 111: 4}
+
+
+def reference_temperature_for_channel(response: str, channel: int) -> Optional[float]:
+    """Cold-junction temperature (°C) for one sample thermocouple, or None."""
+    idx = _CHANNEL_REF_INDEX.get(int(channel))
+    if idx is None:
+        return None
+    try:
+        values = [float(x) for x in str(response).strip().split(",") if x.strip()]
+    except (TypeError, ValueError):
+        return None
+    if idx < len(values) and is_valid_temperature(values[idx]) and values[idx] > 0:
+        return float(values[idx])
+    return None
+
+
+def mean_sigma_temperature(ch101, ch111, ref101=None, ref111=None) -> Optional[float]:
+    """Sigma sample temperature (°C): mean of channels 101 and 111.
+
+    A positive reading is that channel's sample temperature. A 0 °C reading
+    is 0 mV and is replaced with that channel's cold-junction temperature
+    only when the other channel also has no real reading (the sample is at
+    room temperature). A 0 °C channel is left out when the other channel has
+    a real temperature, so a dead thermocouple does not pull a hot sample
+    down to the terminal temperature.
+
+    Returns the mean of the channels that remain, the one remaining channel,
+    or None when neither channel can be used.
+    """
+    direct101 = sample_temperature_to_record(ch101, None)
+    direct111 = sample_temperature_to_record(ch111, None)
+
+    def resolved(reading, reference, other_direct):
+        direct = sample_temperature_to_record(reading, None)
+        if direct is not None:
+            return direct
+        if other_direct is not None:
+            return None
+        return sample_temperature_to_record(reading, reference)
+
+    kept = [
+        value for value in (
+            resolved(ch101, ref101, direct111),
+            resolved(ch111, ref111, direct101),
+        )
+        if value is not None
+    ]
+    if not kept:
+        return None
+    return round(sum(kept) / len(kept), 2)
+
+
+def _configure_sample_thermocouple(daq, channel: int = 111) -> None:
+    """One channel as a type-K thermocouple with the internal cold junction.
 
     The unqualified transducer commands are the ones this instrument already
     measures with. The channel-qualified commands, including the internal
     reference junction, are sent as well: a simulated 0 °C junction makes a
     room-temperature sample read 0 °C.
     """
-    daq.write("ROUT:SCAN (@111)")
-    daq.write('SENS:FUNC "TEMP", (@111)')
+    channel = int(channel)
+    daq.write(f"ROUT:SCAN (@{channel})")
+    daq.write(f'SENS:FUNC "TEMP", (@{channel})')
     daq.write("SENS:TEMP:TRAN TC")
     daq.write("SENS:TEMP:TYPE K")
     for command in (
-        "SENS:TEMP:TRAN TC, (@111)",
-        "SENS:TEMP:TC:TYPE K, (@111)",
-        "SENS:TEMP:TC:RJUN:RSEL INT, (@111)",
+        f"SENS:TEMP:TRAN TC, (@{channel})",
+        f"SENS:TEMP:TC:TYPE K, (@{channel})",
+        f"SENS:TEMP:TC:RJUN:RSEL INT, (@{channel})",
     ):
         try:
             daq.write(command)
@@ -202,19 +263,77 @@ def _configure_sample_thermocouple(daq) -> None:
             pass
 
 
+def _read_configured_channel(daq, channel: int):
+    """Raw temperature from a channel, or None if that read failed."""
+    try:
+        _configure_sample_thermocouple(daq, channel)
+        return float(daq.query("READ?").strip())
+    except Exception:
+        return None
+
+
 def read_thermocouple_temperature(daq) -> Optional[float]:
     """One channel-111 sample temperature (°C) from an open DAQ session."""
-    _configure_sample_thermocouple(daq)
-    reading = float(daq.query("READ?").strip())
+    reading = _read_configured_channel(daq, 111)
     reference = None
     if sample_temperature_to_record(reading, None) is None:
         try:
-            reference = reference_temperature_c(
-                daq.query(":CAL:PROT:CARD1:REFTEMP?")
+            reference = reference_temperature_for_channel(
+                daq.query(":CAL:PROT:CARD1:REFTEMP?"), 111
             )
         except Exception:
             reference = None
     return sample_temperature_to_record(reading, reference)
+
+
+def read_sigma_sample_temperature_from(daq) -> Optional[float]:
+    """Mean of channels 101 and 111 (°C) from an open DAQ session."""
+    ch101 = _read_configured_channel(daq, 101)
+    ch111 = _read_configured_channel(daq, 111)
+    ref101 = ref111 = None
+    if (sample_temperature_to_record(ch101, None) is None
+            or sample_temperature_to_record(ch111, None) is None):
+        try:
+            reply = daq.query(":CAL:PROT:CARD1:REFTEMP?")
+        except Exception:
+            reply = ""
+        ref101 = reference_temperature_for_channel(reply, 101)
+        ref111 = reference_temperature_for_channel(reply, 111)
+    return mean_sigma_temperature(ch101, ch111, ref101, ref111)
+
+
+def read_sigma_sample_temperature() -> Optional[float]:
+    """Sample temperature for σ: mean of thermocouple channels 101 and 111.
+
+    Local mode reads both channels on one DAQ session. Remote mode asks
+    ``instrument_server.py`` for ``/sample_temperature``. Returns None when
+    neither channel has a usable temperature.
+    """
+    if REMOTE_MODE:
+        try:
+            import requests
+            url = (f"http://{INSTRUMENT_SERVER_HOST}:{INSTRUMENT_SERVER_PORT}"
+                   "/sample_temperature")
+            resp = requests.get(
+                url,
+                headers={"X-Token": INSTRUMENT_SERVER_TOKEN},
+                timeout=20,
+            )
+            resp.raise_for_status()
+            return float(resp.json()["temperature"])
+        except Exception:
+            return None
+
+    try:
+        import pyvisa
+        rm = pyvisa.ResourceManager()
+        daq = rm.open_resource(DAQ_RESOURCE)
+        try:
+            return read_sigma_sample_temperature_from(daq)
+        finally:
+            daq.close()
+    except Exception:
+        return None
 
 
 def read_current_temperature() -> Optional[float]:

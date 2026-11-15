@@ -55,6 +55,7 @@ from constants import (
     EUROTHERM_BAUD_RATE, EUROTHERM_TIMEOUT,
     INSTRUMENT_SERVER_PORT, INSTRUMENT_SERVER_TOKEN,
     read_thermocouple_temperature,
+    read_sigma_sample_temperature_from,
 )
 from seebeck_measurement.instruments import DAQController, PowerSupplyController
 from eurotherm_control import EurothermController
@@ -191,6 +192,31 @@ def get_temperature():
                 inst.close()
         if temp is None:
             raise HTTPException(500, "Temperature read failed: no usable channel-111 reading")
+        return {"temperature": temp}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(500, f"Temperature read failed: {exc}")
+
+
+@app.get("/sample_temperature", dependencies=[Depends(verify_token)])
+def get_sample_temperature():
+    """Sigma sample temperature: mean of thermocouple channels 101 and 111."""
+    try:
+        if state.daq and state.daq._is_connected:
+            temp = read_sigma_sample_temperature_from(state.daq)
+        else:
+            import pyvisa
+            rm = pyvisa.ResourceManager()
+            inst = rm.open_resource(DAQ_RESOURCE)
+            inst.timeout = DAQ_TIMEOUT
+            try:
+                temp = read_sigma_sample_temperature_from(inst)
+            finally:
+                inst.close()
+        if temp is None:
+            raise HTTPException(
+                500, "Temperature read failed: no usable channel 101 or 111 reading")
         return {"temperature": temp}
     except HTTPException:
         raise
