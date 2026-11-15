@@ -631,61 +631,50 @@ def record_sample_temperature(results, readings, fallback=None):
 def measure_sigma_with_sample_temperature(read_temperature, readings=None,
                                           progress_callback=None,
                                           fallback_temperature=None, **kwargs):
-    """Run ``measure_sigma`` and record the SAMPLE's mean temperature.
+    """Run ``measure_sigma``, then record one sample temperature.
 
-    The sample thermocouple is read before σ starts and again after every
-    VDP iteration — ``measure_sigma`` closes the DAQ after each reading, so
-    it is free then.  Each of those reads is a single try.
+    The sample temperature is taken once, after the five Van der Pauw
+    iterations. ``read_temperature`` returns that one value — for the GUI
+    and the run scripts it is the mean of thermocouple channels 101 and 111.
+    Readings taken before or between iterations are not used. ``readings``
+    is accepted so older callers still run, and is ignored.
 
     Parameters
     ----------
     read_temperature : callable
-        Returns the sample temperature in °C, or ``None`` if the read failed
-        (e.g. ``constants.read_current_temperature``).
+        Returns the sample temperature in °C, or ``None`` if the read failed.
     readings : list[float] | None
-        Sample temperatures already taken just before σ.  If ``None``, one
-        reading is taken here.
+        Ignored. Kept so existing callers do not break.
     progress_callback : callable | None
-        Passed on to ``measure_sigma``; called after the iteration's
-        temperature has been read.
+        Passed on to ``measure_sigma``.
+    fallback_temperature : float | None
+        Stored when the one sample reading is missing or 0 °C.
     **kwargs
         Passed on to ``measure_sigma``.
 
     Returns
     -------
     dict | None
-        ``measure_sigma``'s results plus ``'temperature'`` (mean of all
-        readings, or ``None`` with a ``'temperature_note'`` if none could be
-        read) and ``'temperature_readings'``.  Every iteration dict also gets
-        its own ``'temperature'``.  A 0 °C reading is not stored: the sigma
-        file uses ``fallback_temperature`` (the temperature this point was
-        measured at) instead.
+        ``measure_sigma``'s results plus ``'temperature'`` (that one reading,
+        or ``None`` with a ``'temperature_note'`` if it could not be read)
+        and ``'temperature_readings'``. Every iteration row is given the
+        same temperature.
     """
-    def _read():
-        try:
-            return read_temperature()
-        except MeasurementAborted:
-            raise
-        except Exception:
-            return None
-
-    if readings is None:
-        t = _read()
-        readings = [t] if _positive_celsius(t) is not None else []
-    else:
-        readings = [t for t in readings if _positive_celsius(t) is not None]
-
-    def _callback(iter_data):
-        t = _positive_celsius(_read())
-        iter_data['temperature'] = round(t, 1) if t is not None else None
-        if t is not None:
-            readings.append(t)
-        if progress_callback:
-            progress_callback(iter_data)
-
-    results = measure_sigma(progress_callback=_callback, **kwargs)
-    if results:
-        record_sample_temperature(results, readings, fallback_temperature)
+    del readings  # one reading after the iterations; nothing earlier is kept
+    results = measure_sigma(progress_callback=progress_callback, **kwargs)
+    if not results:
+        return results
+    try:
+        reading = read_temperature()
+    except MeasurementAborted:
+        raise
+    except Exception:
+        reading = None
+    record_sample_temperature(
+        results,
+        [reading] if reading is not None else [],
+        fallback_temperature,
+    )
     return results
 
 

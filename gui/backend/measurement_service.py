@@ -289,13 +289,10 @@ class _MeasurementWorker(QObject):
                     progress_callback=_sigma_progress,
                 )
             else:
-                # The σ data records the SAMPLE temperature: the mean of
-                # thermocouple channels 101 and 111, never the furnace.
-                # Averaged over this reading plus one after every VDP iteration.
-                start_temp = self._read_sample_temperature()
+                # The σ temperature is one reading taken after the five
+                # iterations: the mean of thermocouple channels 101 and 111.
                 results = measure_sigma_with_sample_temperature(
-                    read_sigma_sample_temperature,
-                    readings=[start_temp] if start_temp is not None else [],
+                    self._read_sample_temperature,
                     progress_callback=_sigma_progress,
                     fallback_temperature=current_temp,
                     sample_t=thickness, sample_dia=diameter,
@@ -309,8 +306,7 @@ class _MeasurementWorker(QObject):
                 if not repaired and sample_temps:
                     self._log(
                         f"σ sample temperature: {results['temperature']:.2f} °C  "
-                        f"(mean of {len(sample_temps)} readings, "
-                        f"{min(sample_temps):.1f}–{max(sample_temps):.1f} °C)"
+                        f"(mean of ch 101 and 111, after the 5 iterations)"
                     )
                 elif not repaired:
                     self._log("⚠ No sample temperature (ch 101 and 111) could be read "
@@ -1238,11 +1234,10 @@ class _MeasurementWorker(QObject):
         return None, None
 
     def _read_sample_temperature(self) -> Optional[float]:
-        """Sample temperature: mean of DAQ channels 101 and 111, or None.
+        """One sample temperature after σ: mean of channels 101 and 111, or None.
 
-        Tried ``_TEMP_READ_ATTEMPTS`` times.  There is deliberately no
-        fallback to the furnace: the σ data holds the sample's own
-        temperature or states that it failed to record.
+        Tried ``_TEMP_READ_ATTEMPTS`` times. There is deliberately no
+        fallback to the furnace here.
         """
         for attempt in range(1, _TEMP_READ_ATTEMPTS + 1):
             t = read_sigma_sample_temperature()
@@ -1253,8 +1248,8 @@ class _MeasurementWorker(QObject):
             if attempt < _TEMP_READ_ATTEMPTS:
                 self._interruptible_sleep(_SAMPLE_TEMP_RETRY_S,
                                           "sample temperature retry")
-        self._log("⚠ Sample temperature (ch 101 and 111) could not be read before σ "
-                  "— it is read again after every σ iteration")
+        self._log("⚠ Sample temperature (ch 101 and 111) could not be read "
+                  "after σ")
         return None
 
     def _furnace_reading(self, eurotherm):

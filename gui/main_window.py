@@ -1347,10 +1347,10 @@ class MainWindow(QMainWindow):
     def _on_cycle_point_completed(self, actual_temp: float, sigma_res: dict, seebeck_res: dict, folder_path: str = ""):
         if sigma_res:
             corr = sigma_res.get("corr_sigma", 0.0)
-            # σ is plotted against the sample temperature, the mean of DAQ
-            # channels 101 and 111 averaged over the measurement. A missing
-            # or zero reading is not a real sample temperature — use the
-            # temperature this point was measured at so the point is not
+            # σ is plotted against the sample temperature: one reading after
+            # the five iterations, the mean of DAQ channels 101 and 111. A
+            # missing or zero reading is not a real sample temperature — use
+            # the temperature this point was measured at so the point is not
             # stacked at 0 °C.
             sample_t = sigma_res.get("temperature")
             try:

@@ -157,7 +157,7 @@ def simulate_sigma_measurement(
     # Resistances that a uniform sample of ``nominal_sigma`` would show,
     # with a little iteration-to-iteration scatter and a slight R1/R2 mismatch.
     d_cm = sample_t / 10.0
-    readings = [round(simulate_temperature_reading(temperature, seed=None if seed is None else seed + 1), 2)]
+    readings = []
 
     sigma_raw = np.zeros(5)
     iteration_results = []
@@ -183,10 +183,6 @@ def simulate_sigma_measurement(
 
         sigma_value = solve_vdp_sigma(r1, r2, sample_t)
         sigma_raw[j] = sigma_value
-        sample_temp = round(
-            float(temperature + rng.normal(0, SIM_PARAMS['temp_noise'])), 1
-        )
-        readings.append(sample_temp)
 
         iter_data = {
             'iteration': j + 1,
@@ -195,7 +191,6 @@ def simulate_sigma_measurement(
             'delta_v1': float(delta_v1), 'delta_v2': float(delta_v2),
             'R1': float(r1), 'R2': float(r2),
             'sigma': float(sigma_value),
-            'temperature': sample_temp,
         }
         iteration_results.append(iter_data)
         if logger:
@@ -217,7 +212,12 @@ def simulate_sigma_measurement(
     uncorr = float(np.median(valid))
     error = _geometry_error(sample_dia)
     corr = uncorr * (1.0 - error)
-    mean_temp = round(float(sum(readings) / len(readings)), 2)
+    # One sample temperature after the five iterations, same as the real
+    # measurement. It is not an average of readings taken during the run.
+    sample_temp = round(simulate_temperature_reading(temperature), 2)
+    readings.append(sample_temp)
+    for it in iteration_results:
+        it['temperature'] = sample_temp
 
     results = {
         'corr_sigma': float(corr),
@@ -229,16 +229,16 @@ def simulate_sigma_measurement(
         'sample_diameter': float(sample_dia),
         'valid_count': int(len(valid)),
         'iterations': iteration_results,
-        'temperature': mean_temp,
+        'temperature': sample_temp,
         'temperature_readings': readings,
         'simulated': True,
     }
 
     if verbose:
         print(f"  [SIM] Electrical Conductivity: {corr:.2e} S/cm")
-        print(f"  [SIM] Sample temperature: {mean_temp:.2f} °C")
+        print(f"  [SIM] Sample temperature: {sample_temp:.2f} °C")
     if logger:
-        logger.info(f"[SIMULATION] Sigma: {corr:.2e} S/cm at {mean_temp:.2f} °C")
+        logger.info(f"[SIMULATION] Sigma: {corr:.2e} S/cm at {sample_temp:.2f} °C")
     return results
 
 
