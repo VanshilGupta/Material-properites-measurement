@@ -304,21 +304,39 @@ def _read_configured_channel(daq, channel: int):
         return None
 
 
-def _read_channel_voltage(daq, channel: int):
-    """DC volts from one channel, or None.
+def _read_thermocouple_voltages(daq):
+    """DC volts for channels 101 and 111, read the way Seebeck reads them.
 
-    The function, range and integration time are the ones Seebeck uses for
-    the thermocouple channels.
+    The cold-junction query has to be done before this. ``*RST`` opens every
+    relay the conductivity measurement left closed, then one scan reads
+    ``[101, 106, 111, 116, 111, 106, 101]`` — Seebeck's scan list. Each
+    thermocouple is read twice and those two voltages are averaged, which is
+    what Seebeck averages before converting to temperature.
+
+    Returns ``(voltage_101, voltage_111)`` in volts, or ``(None, None)``.
     """
+    channels = [101, 106, 111, 116, 111, 106, 101]
     try:
-        channel = int(channel)
-        daq.write(f"ROUT:SCAN (@{channel})")
-        daq.write(f'SENS:FUNC "VOLT:DC", (@{channel})')
-        daq.write(f"VOLT:RANG {DAQ_VOLTAGE_RANGE:g}, (@{channel})")
-        daq.write(f"VOLT:NPLC {DAQ_NPLC:g}, (@{channel})")
-        return float(str(daq.query("READ?")).strip().split(",")[0])
+        channel_str = ",".join(str(ch) for ch in channels)
+        daq.write("*RST")
+        daq.write(f"ROUT:SCAN (@{channel_str})")
+        daq.write(f'SENS:FUNC "VOLT:DC", (@{channel_str})')
+        daq.write(f"VOLT:RANG {DAQ_VOLTAGE_RANGE:g}, (@{channel_str})")
+        daq.write(f"VOLT:NPLC {DAQ_NPLC:g}, (@{channel_str})")
+        daq.write("INIT")
+        daq.query("*OPC?")
+        raw = daq.query(
+            f'TRAC:DATA? 1,{len(channels)},"defbuffer1", READ, REL'
+        )
+        values = str(raw).strip().split(",")
+        voltages = [float(values[i]) for i in range(0, len(values), 2)]
+        if len(voltages) < len(channels):
+            return None, None
+        voltage_101 = (voltages[0] + voltages[6]) / 2.0
+        voltage_111 = (voltages[2] + voltages[4]) / 2.0
+        return voltage_101, voltage_111
     except Exception:
-        return None
+        return None, None
 
 
 def read_thermocouple_temperature(daq) -> Optional[float]:
@@ -336,11 +354,13 @@ def read_thermocouple_temperature(daq) -> Optional[float]:
 
 
 def read_sigma_sample_temperature_from(daq) -> Optional[float]:
-    """Mean of channels 101 and 111 (°C), converted the way Seebeck converts them.
+    """Mean of channels 101 and 111 (°C), read and converted like Seebeck.
 
-    One DC voltage from each channel, then that channel's cold-junction
-    voltage (card reference temperature) is added before the type-K
-    conversion. The DAQ's temperature mode is not used.
+    The card's cold-junction temperatures are read first. The DAQ is then
+    reset and channels 101 and 111 are scanned as DC voltage with Seebeck's
+    scan list, range, and integration time. Each thermocouple voltage is the
+    average of its two scans, and that channel's cold-junction voltage is
+    added before the type-K conversion.
     """
     try:
         reply = daq.query(":CAL:PROT:CARD1:REFTEMP?")
@@ -348,8 +368,7 @@ def read_sigma_sample_temperature_from(daq) -> Optional[float]:
         reply = ""
     ref101 = reference_temperature_for_channel(reply, 101)
     ref111 = reference_temperature_for_channel(reply, 111)
-    v101 = _read_channel_voltage(daq, 101)
-    v111 = _read_channel_voltage(daq, 111)
+    v101, v111 = _read_thermocouple_voltages(daq)
     return sigma_temperature_from_voltages(v101, v111, ref101, ref111)
 
 
