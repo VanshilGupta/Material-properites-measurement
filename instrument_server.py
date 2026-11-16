@@ -201,7 +201,11 @@ def get_temperature():
 
 @app.get("/sample_temperature", dependencies=[Depends(verify_token)])
 def get_sample_temperature():
-    """Sigma sample temperature: mean of thermocouple channels 101 and 111."""
+    """Sigma sample temperature: mean of channels 101 and 111.
+
+    Each channel is a DC voltage with its cold-junction voltage added, the
+    same conversion Seebeck uses.
+    """
     try:
         if state.daq and state.daq._is_connected:
             temp = read_sigma_sample_temperature_from(state.daq)

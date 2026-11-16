@@ -203,15 +203,47 @@ def reference_temperature_for_channel(response: str, channel: int) -> Optional[f
     return None
 
 
-def mean_sigma_temperature(ch101, ch111, ref101=None, ref111=None) -> Optional[float]:
+def thermocouple_temperature_c(voltage_volts, reference_c) -> Optional[float]:
+    """One type-K temperature (°C).
+    """
+    if not is_valid_temperature(reference_c) or float(reference_c) <= 0:
+        return None
+    try:
+        volts = float(voltage_volts)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(volts) or abs(volts) > DAQ_VOLTAGE_RANGE:
+        return None
+    from seebeck_measurement.temperature_conversion import (
+        temp_to_voltage, voltage_to_temp,
+    )
+    millivolts = volts * 1e3
+    cold_junction_mv = float(temp_to_voltage(float(reference_c)))
+    temperature = float(voltage_to_temp(millivolts + cold_junction_mv))
+    if not math.isfinite(temperature):
+        return None
+    return temperature
+
+
+def sigma_temperature_from_voltages(v101, v111, ref101, ref111) -> Optional[float]:
     """Sigma sample temperature (°C): mean of channels 101 and 111.
 
-    A positive reading is that channel's sample temperature. A 0 °C reading
-    is 0 mV and is replaced with that channel's cold-junction temperature
-    only when the other channel also has no real reading (the sample is at
-    room temperature). A 0 °C channel is left out when the other channel has
-    a real temperature, so a dead thermocouple does not pull a hot sample
-    down to the terminal temperature.
+    """
+    kept = [
+        temperature for temperature in (
+            thermocouple_temperature_c(v101, ref101),
+            thermocouple_temperature_c(v111, ref111),
+        )
+        if temperature is not None
+    ]
+    if not kept:
+        return None
+    return round(sum(kept) / len(kept), 2)
+
+
+def mean_sigma_temperature(ch101, ch111, ref101=None, ref111=None) -> Optional[float]:
+    """Mean of two DAQ temperature-mode readings (°C).
+
 
     Returns the mean of the channels that remain, the one remaining channel,
     or None when neither channel can be used.
@@ -272,6 +304,23 @@ def _read_configured_channel(daq, channel: int):
         return None
 
 
+def _read_channel_voltage(daq, channel: int):
+    """DC volts from one channel, or None.
+
+    The function, range and integration time are the ones Seebeck uses for
+    the thermocouple channels.
+    """
+    try:
+        channel = int(channel)
+        daq.write(f"ROUT:SCAN (@{channel})")
+        daq.write(f'SENS:FUNC "VOLT:DC", (@{channel})')
+        daq.write(f"VOLT:RANG {DAQ_VOLTAGE_RANGE:g}, (@{channel})")
+        daq.write(f"VOLT:NPLC {DAQ_NPLC:g}, (@{channel})")
+        return float(str(daq.query("READ?")).strip().split(",")[0])
+    except Exception:
+        return None
+
+
 def read_thermocouple_temperature(daq) -> Optional[float]:
     """One channel-111 sample temperature (°C) from an open DAQ session."""
     reading = _read_configured_channel(daq, 111)
@@ -287,27 +336,31 @@ def read_thermocouple_temperature(daq) -> Optional[float]:
 
 
 def read_sigma_sample_temperature_from(daq) -> Optional[float]:
-    """Mean of channels 101 and 111 (°C) from an open DAQ session."""
-    ch101 = _read_configured_channel(daq, 101)
-    ch111 = _read_configured_channel(daq, 111)
-    ref101 = ref111 = None
-    if (sample_temperature_to_record(ch101, None) is None
-            or sample_temperature_to_record(ch111, None) is None):
-        try:
-            reply = daq.query(":CAL:PROT:CARD1:REFTEMP?")
-        except Exception:
-            reply = ""
-        ref101 = reference_temperature_for_channel(reply, 101)
-        ref111 = reference_temperature_for_channel(reply, 111)
-    return mean_sigma_temperature(ch101, ch111, ref101, ref111)
+    """Mean of channels 101 and 111 (°C), converted the way Seebeck converts them.
+
+    One DC voltage from each channel, then that channel's cold-junction
+    voltage (card reference temperature) is added before the type-K
+    conversion. The DAQ's temperature mode is not used.
+    """
+    try:
+        reply = daq.query(":CAL:PROT:CARD1:REFTEMP?")
+    except Exception:
+        reply = ""
+    ref101 = reference_temperature_for_channel(reply, 101)
+    ref111 = reference_temperature_for_channel(reply, 111)
+    v101 = _read_channel_voltage(daq, 101)
+    v111 = _read_channel_voltage(daq, 111)
+    return sigma_temperature_from_voltages(v101, v111, ref101, ref111)
 
 
 def read_sigma_sample_temperature() -> Optional[float]:
     """Sample temperature for σ: mean of thermocouple channels 101 and 111.
 
-    Local mode reads both channels on one DAQ session. Remote mode asks
+    Each channel is read as a voltage and converted the way Seebeck converts
+    it, with that channel's cold-junction voltage added. Local mode reads
+    both channels on one DAQ session. Remote mode asks
     ``instrument_server.py`` for ``/sample_temperature``. Returns None when
-    neither channel has a usable temperature.
+    neither channel has a voltage and a cold junction.
     """
     if REMOTE_MODE:
         try:

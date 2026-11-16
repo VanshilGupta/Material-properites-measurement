@@ -12,7 +12,9 @@ stays in the per-temperature Sigma/ and Seebeck/ subfolders.
 
 Temperatures are the SAMPLE's, and σ and Seebeck each have their own since
 they are measured at different times:
-  - σ:       one reading after the σ iterations, the mean of DAQ channels 101 and 111
+  - σ:       one reading after the σ iterations, the mean of DAQ channels 101
+             and 111, each converted the way Seebeck converts a thermocouple
+             (the cold-junction voltage is added)
   - Seebeck: mean of every T₁ and T₂ reading of the Seebeck run
 The furnace set-point is kept only to tell the cycle's points apart.
 

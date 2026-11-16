@@ -635,7 +635,9 @@ def measure_sigma_with_sample_temperature(read_temperature, readings=None,
 
     The sample temperature is taken once, after the five Van der Pauw
     iterations. ``read_temperature`` returns that one value — for the GUI
-    and the run scripts it is the mean of thermocouple channels 101 and 111.
+    and the run scripts it is the mean of channels 101 and 111, each read
+    as a voltage with its cold-junction voltage added, the same conversion
+    Seebeck uses.
     Readings taken before or between iterations are not used. ``readings``
     is accepted so older callers still run, and is ignored.
 

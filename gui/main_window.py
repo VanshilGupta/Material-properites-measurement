@@ -1348,7 +1348,8 @@ class MainWindow(QMainWindow):
         if sigma_res:
             corr = sigma_res.get("corr_sigma", 0.0)
             # σ is plotted against the sample temperature: one reading after
-            # the five iterations, the mean of DAQ channels 101 and 111. A
+            # the five iterations, the mean of channels 101 and 111 with the
+            # cold-junction voltage added, the same conversion as Seebeck. A
             # missing or zero reading is not a real sample temperature — use
             # the temperature this point was measured at so the point is not
             # stacked at 0 °C.

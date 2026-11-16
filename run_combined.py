@@ -124,7 +124,8 @@ def run_single_combined(
                 if sigma_results:
                     sigma_results['temperature'] = current_temp  # simulated sample reading
             else:
-                # One sample temperature after the 5 iterations: mean of ch 101 and 111
+                # One sample temperature after the 5 iterations: mean of ch 101 and 111,
+                # each voltage converted with its cold junction, the same way as Seebeck.
                 sigma_results = measure_sigma_with_sample_temperature(
                     read_sigma_sample_temperature,
                     fallback_temperature=current_temp,
@@ -345,7 +346,8 @@ def run_combined_temperature_sweep(
                     if sigma_results:
                         sigma_results['temperature'] = actual_temp  # simulated sample reading
                 else:
-                    # One sample temperature after the 5 iterations: mean of ch 101 and 111
+                    # One sample temperature after the 5 iterations: mean of ch 101 and 111,
+                # each voltage converted with its cold junction, the same way as Seebeck.
                     sigma_results = measure_sigma_with_sample_temperature(
                         read_sigma_sample_temperature,
                         fallback_temperature=actual_temp,

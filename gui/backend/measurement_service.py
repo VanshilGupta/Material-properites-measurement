@@ -306,7 +306,8 @@ class _MeasurementWorker(QObject):
                 if not repaired and sample_temps:
                     self._log(
                         f"σ sample temperature: {results['temperature']:.2f} °C  "
-                        f"(mean of ch 101 and 111, after the 5 iterations)"
+                        f"(mean of ch 101 and 111, cold junction added, "
+                        f"after the 5 iterations)"
                     )
                 elif not repaired:
                     self._log("⚠ No sample temperature (ch 101 and 111) could be read "
@@ -1242,8 +1243,10 @@ class _MeasurementWorker(QObject):
         for attempt in range(1, _TEMP_READ_ATTEMPTS + 1):
             t = read_sigma_sample_temperature()
             if t is not None:
-                t = round(t, 1)
-                self._log(f"Sample temperature (mean of ch 101 and 111): {t:.1f} °C")
+                self._log(
+                    "Sample temperature (mean of ch 101 and 111, "
+                    f"cold junction added): {t:.2f} °C"
+                )
                 return t
             if attempt < _TEMP_READ_ATTEMPTS:
                 self._interruptible_sleep(_SAMPLE_TEMP_RETRY_S,

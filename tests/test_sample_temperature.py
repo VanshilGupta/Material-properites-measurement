@@ -30,6 +30,35 @@ def test_zero_without_a_reference_is_not_recorded():
     assert reference_temperature_c("not a reading") is None
 
 
+def test_sigma_temperature_adds_the_cold_junction_like_seebeck():
+    from seebeck_measurement.temperature_conversion import (
+        temp_to_voltage, voltage_to_temp,
+    )
+    from constants import sigma_temperature_from_voltages
+
+    def converted(volts, reference):
+        return voltage_to_temp(volts * 1e3 + temp_to_voltage(reference))
+
+    # 0 V is a room-temperature thermocouple. Adding each cold junction
+    # makes the saved temperature the mean of the two junctions, not 0 °C.
+    room = sigma_temperature_from_voltages(0.0, 0.0, 23.0, 25.0)
+    assert room == round((converted(0.0, 23.0) + converted(0.0, 25.0)) / 2, 2)
+    assert abs(room - 24.0) < 0.2
+
+    # A sample at 100 °C: the DAQ voltage is the difference from the junction.
+    hot_volts = (temp_to_voltage(100.0) - temp_to_voltage(25.0)) / 1e3
+    assert sigma_temperature_from_voltages(
+        hot_volts, hot_volts, 25.0, 25.0) == round(converted(hot_volts, 25.0), 2)
+    assert abs(sigma_temperature_from_voltages(
+        hot_volts, hot_volts, 25.0, 25.0) - 100.0) < 0.05
+
+    # The two channels are averaged. One missing channel is left out.
+    assert sigma_temperature_from_voltages(0.0, None, 25.0, 25.0) == round(
+        converted(0.0, 25.0), 2)
+    # No cold junction: the voltage alone is not a sample temperature.
+    assert sigma_temperature_from_voltages(0.0, 0.0, None, None) is None
+
+
 def test_sigma_temperature_is_the_mean_of_both_thermocouples():
     from constants import mean_sigma_temperature
 
